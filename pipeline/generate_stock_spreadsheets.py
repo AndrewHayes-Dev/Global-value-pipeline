@@ -195,6 +195,9 @@ def generate_all(all_index_data: dict, bucket: str) -> None:
         index_name = INDEX_NAMES.get(index_id, index_id.upper())
         print(f'  {index_name:20s}', end='', flush=True)
         wb = _build_workbook(index_data, index_name, generated_at)
+        if not wb.worksheets:
+            print('(no data — skipped)')
+            continue
         buf = io.BytesIO()
         wb.save(buf)
         upload_bytes(
