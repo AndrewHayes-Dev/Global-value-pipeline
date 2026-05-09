@@ -89,13 +89,11 @@ def process_index_quote(yahoo: YahooFetcher, fmp: FmpFetcher, index_def: dict) -
 
 def _has_upward_price_trend(yahoo: YahooFetcher, symbol: str) -> bool:
     """Return True if current price > price ~2 years ago."""
-    old_price = yahoo.price_2yr_ago(symbol)
-    if old_price is None:
+    prices = yahoo.price_trend_check(symbol)
+    if prices is None:
         return True  # if data unavailable, don't exclude
-    current = yahoo.current_price(symbol)
-    if current is None:
-        return True
-    return current > old_price
+    old_price, current_price = prices
+    return current_price > old_price
 
 
 # ── Group constituents by GICS sector ────────────────────────────────────────

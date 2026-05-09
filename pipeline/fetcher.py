@@ -114,8 +114,8 @@ class YahooFetcher:
             print(f'  Yahoo chart [{symbol}]: {e}')
         return None
 
-    def price_2yr_ago(self, symbol: str) -> Optional[float]:
-        """Return the close price approximately 2 years ago using monthly chart data."""
+    def price_trend_check(self, symbol: str) -> Optional[tuple[float, float]]:
+        """Return (price_2yr_ago, current_price) from a single 2yr monthly chart call."""
         try:
             encoded = urllib.parse.quote(symbol)
             url = (
@@ -132,20 +132,17 @@ class YahooFetcher:
             result = (data.get('chart') or {}).get('result') or []
             if not result:
                 return None
+            # Current price is in the meta object of every chart response
+            meta = result[0].get('meta') or {}
+            current = meta.get('regularMarketPrice')
             closes = (result[0].get('indicators') or {}).get('quote', [{}])[0].get('close') or []
-            # first available close is ~2 years ago
-            for price in closes:
-                if price is not None:
-                    return float(price)
+            # First non-null close is ~2 years ago (closes are oldest-first)
+            old_price = next((float(c) for c in closes if c is not None), None)
+            if current is None or old_price is None:
+                return None
+            return (old_price, float(current))
         except Exception as e:
-            print(f'  Yahoo 2yr price [{symbol}]: {e}')
-        return None
-
-    def current_price(self, symbol: str) -> Optional[float]:
-        """Return the current market price from the chart endpoint."""
-        meta = self.chart(symbol)
-        if meta:
-            return meta.get('regularMarketPrice')
+            print(f'  Yahoo price trend [{symbol}]: {e}')
         return None
 
 
