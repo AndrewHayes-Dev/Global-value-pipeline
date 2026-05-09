@@ -310,19 +310,30 @@ class WikipediaScraper:
         )
         if not tables:
             return []
+        # Wikipedia NASDAQ-100 uses ICB Industry classification, not GICS.
+        # Map the differing names to their GICS equivalents.
+        _ICB_TO_GICS = {
+            'Technology':         'Information Technology',
+            'Telecommunications': 'Communication Services',
+            'Basic Materials':    'Materials',
+        }
         try:
             for df in tables:
                 sym_col  = next((c for c in df.columns if 'ticker' in str(c).lower() or
                                  'symbol' in str(c).lower()), None)
                 name_col = next((c for c in df.columns if 'company' in str(c).lower()), None)
+                # Prefer the broader Industry column over Subsector
+                ind_col  = next((c for c in df.columns if 'industry' in str(c).lower()), None)
                 sec_col  = next((c for c in df.columns if 'sector' in str(c).lower()), None)
+                classify_col = ind_col or sec_col
                 if sym_col is None:
                     continue
                 results = []
                 for _, row in df.iterrows():
-                    ticker   = str(row.get(sym_col, '')).strip().replace('.', '-')
-                    name     = str(row.get(name_col, ticker)).strip() if name_col else ticker
-                    sector   = str(row.get(sec_col, '')).strip() if sec_col else ''
+                    ticker     = str(row.get(sym_col, '')).strip().replace('.', '-')
+                    name       = str(row.get(name_col, ticker)).strip() if name_col else ticker
+                    raw_sector = str(row.get(classify_col, '')).strip() if classify_col else ''
+                    sector     = _ICB_TO_GICS.get(raw_sector, raw_sector)
                     if ticker and len(ticker) <= 6:
                         results.append({
                             'ticker':        ticker,
