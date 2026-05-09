@@ -26,8 +26,11 @@ GICS_TO_SUFFIX = {
     'Industrials':            'industrials',
     'Energy':                 'energy',
     'Information Technology': 'tech',
+    'Technology':             'tech',   # Wikipedia NASDAQ-100 uses this alias
     'Utilities':              'utilities',
     'Communication Services': 'comms',
+    'Communication':          'comms',  # alternate Wikipedia label
+    'Telecommunications':     'comms',  # alternate Wikipedia label
 }
 
 # All 11 GICS sectors in display order
