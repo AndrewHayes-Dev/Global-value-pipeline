@@ -1,0 +1,32 @@
+name: Global Monthly Data Pipeline
+
+on:
+  schedule:
+    - cron: '0 7 1 * *'   # 1st of every month at 7am UTC
+  workflow_dispatch:        # allows manual run from GitHub Actions UI
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          FMP_API_KEY:                ${{ secrets.FMP_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID:      ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GLOBAL_R2_ACCESS_KEY_ID:    ${{ secrets.GLOBAL_R2_ACCESS_KEY_ID }}
+          GLOBAL_R2_SECRET_ACCESS_KEY: ${{ secrets.GLOBAL_R2_SECRET_ACCESS_KEY }}
+          GLOBAL_R2_BUCKET_NAME:      global-investor-data
+        run: python pipeline/main.py

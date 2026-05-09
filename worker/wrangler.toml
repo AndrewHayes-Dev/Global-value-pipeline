@@ -1,0 +1,10 @@
+name = "global-investor-data"
+main = "index.js"
+compatibility_date = "2024-09-23"
+
+[[r2_buckets]]
+binding     = "GLOBAL_R2_BUCKET"
+bucket_name = "global-investor-data"
+
+# GLOBAL_API_SECRET is stored as a Worker secret — not in this file.
+# Set it once with: wrangler secret put GLOBAL_API_SECRET
