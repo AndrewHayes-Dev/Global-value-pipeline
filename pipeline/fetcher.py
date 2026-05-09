@@ -226,11 +226,12 @@ class WikipediaScraper:
     def _fetch_tables(self, url: str) -> list:
         try:
             import pandas as pd
+            from io import StringIO
             r = self.session.get(url, headers=self._WIKI_HEADERS, timeout=30)
             if r.status_code != 200:
                 print(f'  Wikipedia fetch failed [{url}]: HTTP {r.status_code}')
                 return []
-            return pd.read_html(r.text)
+            return pd.read_html(StringIO(r.text))
         except Exception as e:
             print(f'  Wikipedia parse error [{url}]: {e}')
             return []
