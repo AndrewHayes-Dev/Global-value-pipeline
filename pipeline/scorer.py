@@ -40,14 +40,20 @@ def _extract_string(summary: dict, key: str) -> Optional[str]:
     return None
 
 
+_BANK_INDUSTRIES = {
+    'Diversified Banks', 'Regional Banks', 'Commercial Banks',
+    'Thrifts & Mortgage Finance', 'Consumer Finance',
+}
+
 def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
                   owner_earnings, roic, div_yield,
                   roe=None, peg_ratio=None, interest_coverage=None,
                   gross_margin=None, current_ratio=None, eps_growth=None,
                   roe_3yr_avg=None, earnings_consistency=None,
                   book_value_growth=None, net_net_ratio=None,
-                  revenue_growth=None) -> float:
+                  revenue_growth=None, industry: str = '') -> float:
     score = 0.0
+    is_bank = industry in _BANK_INDUSTRIES
 
     if pe is not None and pe > 0:
         if pe <= 10:   score += 20
@@ -66,16 +72,18 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
         elif margin_of_safety >= 15: score += 8
         elif margin_of_safety >= 5:  score += 3
 
-    if fcf_yield is not None:
-        if fcf_yield >= 0.08:   score += 15
-        elif fcf_yield >= 0.05: score += 10
-        elif fcf_yield >= 0.02: score += 5
-        elif fcf_yield > 0:     score += 2
+    if not is_bank:
+        if fcf_yield is not None:
+            if fcf_yield >= 0.08:   score += 15
+            elif fcf_yield >= 0.05: score += 10
+            elif fcf_yield >= 0.02: score += 5
+            elif fcf_yield > 0:     score += 2
 
-    if debt_equity is not None:
-        if debt_equity <= 0.25:  score += 10
-        elif debt_equity <= 0.5: score += 7
-        elif debt_equity <= 1.0: score += 3
+    if not is_bank:
+        if debt_equity is not None:
+            if debt_equity <= 0.25:  score += 10
+            elif debt_equity <= 0.5: score += 7
+            elif debt_equity <= 1.0: score += 3
 
     if owner_earnings is not None and owner_earnings > 0:
         score += 10
@@ -105,7 +113,7 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
         elif interest_coverage >= 5: score += 3
         elif interest_coverage >= 2: score += 1
 
-    if gross_margin is not None:
+    if not is_bank and gross_margin is not None:
         if gross_margin >= 0.40:   score += 5
         elif gross_margin >= 0.20: score += 3
         elif gross_margin >= 0.10: score += 1
@@ -144,7 +152,7 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
         elif revenue_growth >= 0.07: score += 3
         elif revenue_growth > 0:     score += 1
 
-    _MAX_RAW_SCORE = 164.0
+    _MAX_RAW_SCORE = 134.0 if is_bank else 164.0
     return round(min(100.0, max(0.0, score / _MAX_RAW_SCORE * 100.0)), 1)
 
 
@@ -345,7 +353,7 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         eps_growth=eps_growth, roe_3yr_avg=roe_3yr_avg,
         earnings_consistency=earnings_consistency,
         book_value_growth=book_value_growth, net_net_ratio=net_net_ratio,
-        revenue_growth=revenue_growth,
+        revenue_growth=revenue_growth, industry=industry,
     )
 
     return {
