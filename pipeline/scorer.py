@@ -45,6 +45,50 @@ _BANK_INDUSTRIES = {
     'Thrifts & Mortgage Finance', 'Consumer Finance',
 }
 
+
+def quality_score(*, fcf_margin, capex_intensity, gross_margin,
+                  shareholder_yield, roe_avg, ev_ebit) -> float:
+    score = 0.0
+
+    if fcf_margin is not None:
+        if fcf_margin >= 0.20:   score += 20
+        elif fcf_margin >= 0.15: score += 15
+        elif fcf_margin >= 0.10: score += 10
+        elif fcf_margin >= 0.05: score += 5
+
+    if capex_intensity is not None and capex_intensity >= 0:
+        if capex_intensity <= 0.02:   score += 20
+        elif capex_intensity <= 0.05: score += 15
+        elif capex_intensity <= 0.10: score += 8
+        elif capex_intensity <= 0.20: score += 3
+
+    if gross_margin is not None and gross_margin > 0:
+        if gross_margin >= 0.50:   score += 20
+        elif gross_margin >= 0.35: score += 15
+        elif gross_margin >= 0.20: score += 8
+        elif gross_margin >= 0.10: score += 3
+
+    if shareholder_yield is not None and shareholder_yield > 0:
+        if shareholder_yield >= 0.08:   score += 15
+        elif shareholder_yield >= 0.05: score += 10
+        elif shareholder_yield >= 0.03: score += 6
+        elif shareholder_yield >= 0.01: score += 3
+
+    if roe_avg is not None and roe_avg > 0:
+        if roe_avg >= 0.25:   score += 15
+        elif roe_avg >= 0.20: score += 12
+        elif roe_avg >= 0.15: score += 8
+        elif roe_avg >= 0.10: score += 4
+
+    if ev_ebit is not None and ev_ebit > 0:
+        if ev_ebit <= 8:    score += 15
+        elif ev_ebit <= 12: score += 10
+        elif ev_ebit <= 18: score += 6
+        elif ev_ebit <= 25: score += 2
+
+    _MAX_QUALITY = 105.0
+    return round(min(100.0, max(0.0, score / _MAX_QUALITY * 100.0)), 1)
+
 def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
                   owner_earnings, roic, div_yield,
                   roe=None, peg_ratio=None, interest_coverage=None,
@@ -337,6 +381,31 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if free_cash_flow is not None and mc_for_yield and mc_for_yield > 0:
         fcf_yield = free_cash_flow / mc_for_yield
 
+    # ── Quality metrics ───────────────────────────────────────────────────────
+    fcf_margin = None
+    if free_cash_flow is not None and revenue and revenue > 0:
+        fcf_margin = free_cash_flow / revenue
+
+    capex_intensity = None
+    if capex is not None and revenue and revenue > 0:
+        capex_intensity = abs(capex) / revenue
+
+    repurchase = _extract(cash, ['repurchaseOfStock'])
+    buyback_yield = None
+    if repurchase is not None and mc_for_yield and mc_for_yield > 0:
+        buyback_yield = abs(repurchase) / mc_for_yield
+    shareholder_yield = None
+    if div_yield is not None or buyback_yield is not None:
+        shareholder_yield = (div_yield or 0.0) + (buyback_yield or 0.0)
+
+    cash_and_equiv = _extract(fin, ['totalCash'])
+    ev = None
+    if market_cap is not None and total_debt is not None:
+        ev = market_cap + total_debt - (cash_and_equiv or 0)
+    ev_ebit = None
+    if ev is not None and ebit is not None and ebit > 0 and ev > 0:
+        ev_ebit = ev / ebit
+
     # Pull industry from Yahoo summaryProfile if not supplied by caller
     if not industry:
         industry = profile.get('industry') or ''
@@ -355,6 +424,14 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         book_value_growth=book_value_growth, net_net_ratio=net_net_ratio,
         revenue_growth=revenue_growth, industry=industry,
     )
+
+    q_score = quality_score(
+        fcf_margin=fcf_margin, capex_intensity=capex_intensity,
+        gross_margin=gross_margin, shareholder_yield=shareholder_yield,
+        roe_avg=roe_3yr_avg, ev_ebit=ev_ebit,
+    )
+
+    blended_score = round(0.6 * score + 0.4 * q_score, 1)
 
     return {
         'ticker':                ticker,
@@ -387,6 +464,12 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         'book_value_growth':     book_value_growth,
         'net_net_ratio':         net_net_ratio,
         'revenue_growth':        revenue_growth,
+        'quality_score':         q_score,
+        'blended_score':         blended_score,
+        'fcf_margin':            fcf_margin,
+        'capex_intensity':       capex_intensity,
+        'shareholder_yield':     shareholder_yield,
+        'ev_ebit':               ev_ebit,
     }
 
 

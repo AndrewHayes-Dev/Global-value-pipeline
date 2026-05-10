@@ -144,7 +144,7 @@ def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
             print(f'      Error [{ticker}]: {e}')
         time.sleep(INTER_STOCK_DELAY)
 
-    scored.sort(key=lambda s: s['score'], reverse=True)
+    scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
     top20 = scored[:20]
 
     enriched = []
@@ -192,7 +192,7 @@ def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher
             print(f'      Error [{ticker}]: {e}')
         time.sleep(INTER_STOCK_DELAY)
 
-    scored.sort(key=lambda s: s['score'], reverse=True)
+    scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
     top20 = scored[:20]
 
     enriched = []
@@ -234,7 +234,7 @@ def process_xao_sector(yahoo: YahooFetcher, sector_id: str, sector_name: str,
             print(f'      Error [{ticker}]: {e}')
         time.sleep(INTER_STOCK_DELAY)
 
-    scored.sort(key=lambda s: s['score'], reverse=True)
+    scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
     top20 = scored[:20]
     stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top20, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
@@ -271,6 +271,12 @@ def _format_stock(s: dict, rank: int) -> dict:
         'book_value_growth':    s.get('book_value_growth'),
         'net_net_ratio':        s.get('net_net_ratio'),
         'revenue_growth':       s.get('revenue_growth'),
+        'quality_score':        s.get('quality_score'),
+        'blended_score':        s.get('blended_score'),
+        'fcf_margin':           s.get('fcf_margin'),
+        'capex_intensity':      s.get('capex_intensity'),
+        'shareholder_yield':    s.get('shareholder_yield'),
+        'ev_ebit':              s.get('ev_ebit'),
     }
 
 
