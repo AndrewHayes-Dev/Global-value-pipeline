@@ -146,6 +146,109 @@ class YahooFetcher:
         return None
 
 
+# ── SEC EDGAR ─────────────────────────────────────────────────────────────────
+
+class EdgarFetcher:
+    """
+    Free, unlimited fallback for US balance sheet and income statement data.
+    Uses official SEC EDGAR XBRL API — no API key required.
+    Call warm_up() once at pipeline start to load the ticker→CIK map.
+    """
+    _TICKER_URL = 'https://www.sec.gov/files/company_tickers.json'
+    _FACTS_BASE = 'https://data.sec.gov/api/xbrl/companyfacts'
+    _HEADERS    = {
+        'User-Agent': 'GlobalValuePipeline/1.0 andrew.hayes.australia@gmail.com',
+        'Accept-Encoding': 'gzip, deflate, br',
+    }
+
+    def __init__(self):
+        self.session  = requests.Session()
+        self._cik_map: dict = {}
+
+    def warm_up(self):
+        """Load ticker→CIK mapping. Call once at pipeline start."""
+        try:
+            r = self.session.get(self._TICKER_URL, headers=self._HEADERS, timeout=30)
+            if r.status_code == 200:
+                self._cik_map = {
+                    str(v['ticker']).upper(): str(v['cik_str']).zfill(10)
+                    for v in r.json().values()
+                }
+                print(f'  EDGAR: {len(self._cik_map)} tickers loaded')
+            else:
+                print(f'  EDGAR warm-up: HTTP {r.status_code}')
+        except Exception as e:
+            print(f'  EDGAR warm-up failed: {e}')
+
+    def get_stock_data(self, ticker: str) -> Optional[dict]:
+        """
+        Return dict of annual XBRL values for the fields needed by enrich_from_edgar.
+        Each value is a list (newest annual period first). Returns None on failure.
+        """
+        cik = self._cik_map.get(ticker.upper())
+        if not cik:
+            return None
+        try:
+            r = self.session.get(
+                f'{self._FACTS_BASE}/CIK{cik}.json',
+                headers=self._HEADERS,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                return None
+            gaap = (r.json().get('facts') or {}).get('us-gaap') or {}
+
+            def annual_vals(concepts: list, n: int = 2) -> list:
+                for concept in concepts:
+                    data = gaap.get(concept)
+                    if not data:
+                        continue
+                    entries = (data.get('units') or {}).get('USD') or []
+                    fy_entries = sorted(
+                        [e for e in entries
+                         if e.get('form') == '10-K' and e.get('fp') in ('FY', 'Q4')],
+                        key=lambda x: x.get('end', ''),
+                        reverse=True,
+                    )
+                    seen, result = set(), []
+                    for e in fy_entries:
+                        fy = e.get('fy')
+                        if fy and fy not in seen:
+                            seen.add(fy)
+                            result.append(float(e['val']))
+                            if len(result) >= n:
+                                break
+                    if result:
+                        return result
+                return []
+
+            return {
+                'interest_expense': annual_vals([
+                    'InterestExpense', 'InterestExpenseBorrowings',
+                    'InterestExpenseDebt', 'InterestExpenseShortTermBorrowings',
+                ], 1),
+                'operating_income': annual_vals(['OperatingIncomeLoss'], 1),
+                # EBT fallback for companies that don't file OperatingIncomeLoss
+                'ebt': annual_vals([
+                    'IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest',
+                    'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments',
+                ], 1),
+                'equity': annual_vals([
+                    'StockholdersEquity',
+                    'StockholdersEquityAttributableToParent',
+                    'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest',
+                    'CommonStockholdersEquity',
+                ], 2),
+                'current_assets':    annual_vals(['AssetsCurrent'], 1),
+                'total_liabilities': annual_vals(['Liabilities'], 1),
+                # total_assets used to compute liabilities when Liabilities not filed directly
+                'total_assets': annual_vals(['Assets', 'LiabilitiesAndStockholdersEquity'], 1),
+            }
+        except Exception as e:
+            print(f'  EDGAR [{ticker}]: {e}')
+        return None
+
+
 # ── FMP ───────────────────────────────────────────────────────────────────────
 
 class FmpFetcher:

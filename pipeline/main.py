@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from fetcher import YahooFetcher, FmpFetcher, fetch_xao, WikipediaScraper
-from scorer import score_from_summary, enrich_from_fmp
+from fetcher import YahooFetcher, FmpFetcher, EdgarFetcher, fetch_xao, WikipediaScraper
+from scorer import score_from_summary, enrich_from_fmp, enrich_from_edgar
 from uploader import upload_json
 from generate_stock_spreadsheets import generate_all as generate_spreadsheets
 from sector_stocks import (
@@ -119,7 +119,7 @@ def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
 
 # ── Process one US sector ─────────────────────────────────────────────────────
 
-def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
+def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                       sector_id: str, sector_name: str,
                       sector_constituents: list[dict],
                       index_id: str) -> dict:
@@ -149,11 +149,20 @@ def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
 
     enriched = []
     for stock in top20:
+        # FMP enrichment for well-known large-caps
         if stock['ticker'] in FMP_RATIOS_ALLOWED and FMP_KEY:
             ratios_list = fmp.ratios(stock['ticker'], limit=2)
             if ratios_list:
                 km = fmp.key_metrics(stock['ticker'], limit=1)
                 stock = enrich_from_fmp(stock, ratios_list, km)
+        # EDGAR fallback for any fields still null after FMP
+        if (stock.get('interest_coverage') is None or
+                stock.get('book_value_growth') is None or
+                stock.get('net_net_ratio') is None):
+            edgar_data = edgar.get_stock_data(stock['ticker'])
+            if edgar_data:
+                stock = enrich_from_edgar(stock, edgar_data)
+            time.sleep(0.1)
         enriched.append(stock)
     enriched.sort(key=lambda s: s['score'], reverse=True)
 
@@ -164,7 +173,7 @@ def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
 
 # ── Process Russell 2000 sector (curated tickers) ────────────────────────────
 
-def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
+def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                         sector_id: str, sector_name: str,
                         tickers: list[str]) -> dict:
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
@@ -185,7 +194,19 @@ def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
 
     scored.sort(key=lambda s: s['score'], reverse=True)
     top20 = scored[:20]
-    stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top20, 1)]
+
+    enriched = []
+    for stock in top20:
+        if (stock.get('interest_coverage') is None or
+                stock.get('book_value_growth') is None or
+                stock.get('net_net_ratio') is None):
+            edgar_data = edgar.get_stock_data(stock['ticker'])
+            if edgar_data:
+                stock = enrich_from_edgar(stock, edgar_data)
+            time.sleep(0.1)
+        enriched.append(stock)
+
+    stocks_out = [_format_stock(s, rank) for rank, s in enumerate(enriched, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out,
             'constituents_unavailable': False}
@@ -263,6 +284,9 @@ def main():
     yahoo  = YahooFetcher()
     fmp    = FmpFetcher(FMP_KEY)
     wiki   = WikipediaScraper()
+    edgar  = EdgarFetcher()
+    print('Loading EDGAR ticker map...')
+    edgar.warm_up()
 
     # ── XAO universe ─────────────────────────────────────────────────────────
     print('Fetching XAO stock universe...')
@@ -330,7 +354,7 @@ def main():
                 if not constituents:
                     sectors_out.append({'sector_id': sector_id, 'name': gics_name, 'stocks': []})
                     continue
-                sd = process_us_sector(yahoo, fmp, sector_id, gics_name, constituents, 'sp500')
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'sp500')
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
@@ -340,7 +364,7 @@ def main():
                 constituents = djia_by_sector.get(sector_id, {}).get('stocks', [])
                 if not constituents:
                     continue
-                sd = process_us_sector(yahoo, fmp, sector_id, gics_name, constituents, 'djia')
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'djia')
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
@@ -350,7 +374,7 @@ def main():
                 constituents = nasdaq_by_sector.get(sector_id, {}).get('stocks', [])
                 if not constituents:
                     continue
-                sd = process_us_sector(yahoo, fmp, sector_id, gics_name, constituents, 'nasdaq')
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'nasdaq')
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
@@ -360,7 +384,7 @@ def main():
                 tickers   = RUSSELL2000_SECTOR_STOCKS.get(sector_id, [])
                 if not tickers:
                     continue
-                sd = process_r2k_sector(yahoo, fmp, sector_id, gics_name, tickers)
+                sd = process_r2k_sector(yahoo, fmp, edgar, sector_id, gics_name, tickers)
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 

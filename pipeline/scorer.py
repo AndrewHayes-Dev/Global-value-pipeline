@@ -382,6 +382,79 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     }
 
 
+def enrich_from_edgar(stock: dict, edgar_data: Optional[dict]) -> dict:
+    """
+    Fill interest_coverage, book_value_growth, net_net_ratio from SEC EDGAR XBRL data.
+    edgar_data comes from EdgarFetcher.get_stock_data().
+    """
+    if not edgar_data:
+        return stock
+
+    interest_coverage = stock.get('interest_coverage')
+    book_value_growth = stock.get('book_value_growth')
+    net_net_ratio     = stock.get('net_net_ratio')
+
+    ie  = edgar_data.get('interest_expense', [])
+    oi  = edgar_data.get('operating_income', [])
+    ebt = edgar_data.get('ebt', [])
+    eq  = edgar_data.get('equity', [])
+    ca  = edgar_data.get('current_assets', [])
+    tl  = edgar_data.get('total_liabilities', [])
+    ta  = edgar_data.get('total_assets', [])
+
+    # interest_coverage = EBIT / interest_expense
+    # EBIT = OperatingIncomeLoss; fallback: EBT + InterestExpense (for companies
+    # like IBM that don't file OperatingIncomeLoss as a standalone XBRL concept)
+    if interest_coverage is None and ie:
+        ebit = oi[0] if oi else ((ebt[0] + ie[0]) if ebt else None)
+        if ebit is not None and ie[0] != 0:
+            interest_coverage = ebit / abs(ie[0])
+
+    # book_value_growth = year-over-year equity change
+    if book_value_growth is None and len(eq) >= 2 and eq[1] != 0:
+        book_value_growth = (eq[0] - eq[1]) / abs(eq[1])
+
+    # net_net_ratio = (current_assets - total_liabilities) / market_cap
+    # When Liabilities isn't filed directly, derive it as total_assets - equity
+    if net_net_ratio is None and ca:
+        mc = stock.get('market_cap')
+        if mc and mc > 0:
+            if tl:
+                net_net_ratio = (ca[0] - tl[0]) / mc
+            elif ta and eq:
+                net_net_ratio = (ca[0] - (ta[0] - eq[0])) / mc
+
+    if (interest_coverage == stock.get('interest_coverage') and
+            book_value_growth == stock.get('book_value_growth') and
+            net_net_ratio == stock.get('net_net_ratio')):
+        return stock
+
+    fcf = stock.get('free_cash_flow')
+    mc  = stock.get('market_cap')
+    fcf_yield = fcf / mc if fcf is not None and mc and mc > 0 else None
+
+    new_score = buffett_score(
+        pe=stock.get('pe_ratio'), pb=stock.get('pb_ratio'),
+        margin_of_safety=stock.get('margin_of_safety'),
+        fcf_yield=fcf_yield, debt_equity=stock.get('debt_equity'),
+        owner_earnings=stock.get('owner_earnings'), roic=stock.get('roic'),
+        div_yield=stock.get('dividend_yield'),
+        roe=stock.get('roe'), peg_ratio=stock.get('peg_ratio'),
+        interest_coverage=interest_coverage,
+        gross_margin=stock.get('gross_margin'), current_ratio=stock.get('current_ratio'),
+        eps_growth=stock.get('eps_growth'), roe_3yr_avg=stock.get('roe_3yr_avg'),
+        earnings_consistency=stock.get('earnings_consistency'),
+        book_value_growth=book_value_growth,
+        net_net_ratio=net_net_ratio,
+        revenue_growth=stock.get('revenue_growth'),
+    )
+
+    return {**stock, 'score': new_score,
+            'interest_coverage': interest_coverage,
+            'book_value_growth': book_value_growth,
+            'net_net_ratio': net_net_ratio}
+
+
 def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) -> dict:
     """
     ratios_list: list of FMP annual ratio dicts, newest first (from FmpFetcher.ratios())
