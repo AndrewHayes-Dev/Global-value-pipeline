@@ -172,22 +172,42 @@ class FmpFetcher:
             print(f'  FMP index quote [{symbol}]: {e}')
         return None
 
-    def ratios(self, ticker: str) -> Optional[dict]:
+    def ratios(self, ticker: str, limit: int = 2) -> list:
+        """Return list of annual ratio dicts (newest first). Two periods needed for book value growth."""
         if not self.api_key:
-            return None
+            return []
         try:
             r = self.session.get(
-                f'{self._BASE}/ratios?symbol={ticker}&apikey={self.api_key}',
+                f'{self._BASE}/ratios?symbol={ticker}&limit={limit}&apikey={self.api_key}',
                 timeout=_TIMEOUT,
             )
             if r.status_code != 200:
-                return None
+                return []
             data = r.json()
-            if isinstance(data, list) and data:
-                return data[0]
+            if isinstance(data, list):
+                return data[:limit]
         except Exception as e:
             print(f'  FMP ratios [{ticker}]: {e}')
-        return None
+        return []
+
+    def key_metrics(self, ticker: str, limit: int = 1) -> list:
+        """Return list of annual key-metric dicts. Provides netCurrentAssetValue for net-net ratio."""
+        if not self.api_key:
+            return []
+        try:
+            r = self.session.get(
+                f'{self._BASE}/key-metrics?symbol={ticker}&period=annual'
+                f'&limit={limit}&apikey={self.api_key}',
+                timeout=_TIMEOUT,
+            )
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            if isinstance(data, list):
+                return data[:limit]
+        except Exception as e:
+            print(f'  FMP key metrics [{ticker}]: {e}')
+        return []
 
 
 # ── XAO data source ───────────────────────────────────────────────────────────

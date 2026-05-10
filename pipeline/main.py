@@ -150,9 +150,10 @@ def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher,
     enriched = []
     for stock in top20:
         if stock['ticker'] in FMP_RATIOS_ALLOWED and FMP_KEY:
-            ratios = fmp.ratios(stock['ticker'])
-            if ratios:
-                stock = enrich_from_fmp(stock, ratios)
+            ratios_list = fmp.ratios(stock['ticker'], limit=2)
+            if ratios_list:
+                km = fmp.key_metrics(stock['ticker'], limit=1)
+                stock = enrich_from_fmp(stock, ratios_list, km)
         enriched.append(stock)
     enriched.sort(key=lambda s: s['score'], reverse=True)
 

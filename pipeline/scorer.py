@@ -382,12 +382,18 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     }
 
 
-def enrich_from_fmp(stock: dict, ratios: dict) -> dict:
-    if not ratios:
+def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) -> dict:
+    """
+    ratios_list: list of FMP annual ratio dicts, newest first (from FmpFetcher.ratios())
+    key_metrics: list of FMP annual key-metric dicts (from FmpFetcher.key_metrics())
+    """
+    if not ratios_list:
         return stock
 
-    def fmp_double(key):
-        v = ratios.get(key)
+    ratios = ratios_list[0]
+
+    def fmp_double(key, src=None):
+        v = (src or ratios).get(key)
         if v is None:
             return None
         try:
@@ -418,19 +424,49 @@ def enrich_from_fmp(stock: dict, ratios: dict) -> dict:
     if fcf is not None and stock.get('market_cap') and stock['market_cap'] > 0:
         fcf_yield = fcf / stock['market_cap']
 
+    # Fill ratios Yahoo Finance no longer provides via balance sheet data
+    interest_coverage = stock.get('interest_coverage')
+    book_value_growth = stock.get('book_value_growth')
+    net_net_ratio     = stock.get('net_net_ratio')
+
+    # interest_coverage: FMP interestCoverageRatio; 0 means no net interest expense (skip)
+    if interest_coverage is None:
+        ic_raw = fmp_double('interestCoverageRatio')
+        if ic_raw is not None and ic_raw > 0:
+            interest_coverage = ic_raw
+
+    # book_value_growth: year-over-year change in bookValuePerShare (needs 2 periods)
+    if book_value_growth is None and len(ratios_list) >= 2:
+        bvps0 = fmp_double('bookValuePerShare', ratios_list[0])
+        bvps1 = fmp_double('bookValuePerShare', ratios_list[1])
+        if bvps0 is not None and bvps1 is not None and bvps1 != 0:
+            book_value_growth = (bvps0 - bvps1) / abs(bvps1)
+
+    # net_net_ratio: (current_assets - total_liabilities) / market_cap
+    # FMP key-metrics provides netCurrentAssetValue (total $) and marketCap
+    if net_net_ratio is None and key_metrics:
+        km0 = key_metrics[0]
+        ncav = fmp_double('netCurrentAssetValue', km0)
+        mc   = fmp_double('marketCap', km0)
+        if ncav is not None and mc and mc > 0:
+            net_net_ratio = ncav / mc
+
     new_score = buffett_score(
         pe=pe, pb=pb, margin_of_safety=stock['margin_of_safety'],
         fcf_yield=fcf_yield, debt_equity=de,
         owner_earnings=stock['owner_earnings'], roic=roic, div_yield=div_yield,
         roe=stock.get('roe'), peg_ratio=stock.get('peg_ratio'),
-        interest_coverage=stock.get('interest_coverage'),
+        interest_coverage=interest_coverage,
         gross_margin=stock.get('gross_margin'), current_ratio=stock.get('current_ratio'),
         eps_growth=stock.get('eps_growth'), roe_3yr_avg=stock.get('roe_3yr_avg'),
         earnings_consistency=stock.get('earnings_consistency'),
-        book_value_growth=stock.get('book_value_growth'),
-        net_net_ratio=stock.get('net_net_ratio'),
+        book_value_growth=book_value_growth,
+        net_net_ratio=net_net_ratio,
         revenue_growth=stock.get('revenue_growth'),
     )
 
     return {**stock, 'pe_ratio': pe, 'pb_ratio': pb, 'dividend_yield': div_yield,
-            'debt_equity': de, 'roic': roic, 'free_cash_flow': fcf, 'score': new_score}
+            'debt_equity': de, 'roic': roic, 'free_cash_flow': fcf, 'score': new_score,
+            'interest_coverage': interest_coverage,
+            'book_value_growth': book_value_growth,
+            'net_net_ratio': net_net_ratio}
