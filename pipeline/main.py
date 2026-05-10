@@ -17,6 +17,7 @@ from sector_stocks import (
     INDEX_DEFINITIONS, GICS_TO_SUFFIX, GICS_SECTORS_ORDERED,
     RUSSELL2000_SECTOR_STOCKS, FMP_RATIOS_ALLOWED,
 )
+from notify import send_data_update_notification
 
 load_dotenv()
 
@@ -420,6 +421,11 @@ def main():
     upload_json('metadata.json', metadata, BUCKET)
 
     print(f'\n=== Pipeline complete in {elapsed}s — {total_stocks} stocks ===\n')
+
+    send_data_update_notification(
+        total_stocks=total_stocks,
+        indices_count=len(INDEX_DEFINITIONS),
+    )
 
 
 if __name__ == '__main__':
