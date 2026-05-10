@@ -162,10 +162,13 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     income_list = (summary.get('incomeStatementHistory') or {}).get('incomeStatementHistory') or []
     cash_list   = (summary.get('cashflowStatementHistory') or {}).get('cashflowStatements') or []
     bal_list    = (summary.get('balanceSheetHistory') or {}).get('balanceSheetStatements') or []
+    bal_list_q  = (summary.get('balanceSheetHistoryQuarterly') or {}).get('balanceSheetStatements') or []
 
     income  = income_list[0] if income_list else {}
     cash    = cash_list[0]   if cash_list   else {}
-    balance = bal_list[0]    if bal_list    else {}
+    # Use annual balance sheet for single-period calcs; fall back to most recent quarter
+    balance = (bal_list[0] if bal_list else
+               (bal_list_q[0] if bal_list_q else {}))
 
     price = _extract(fin, ['currentPrice'])
 
@@ -227,7 +230,12 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
 
     roe       = _extract(fin, ['returnOnEquity'])
     peg_ratio = _extract(key_stats, ['pegRatio'])
-    ebit              = _extract(income, ['ebit'])
+    ebit = (_extract(income, ['ebit']) or
+            _extract(income, ['operatingIncome']))
+    if ebit is None:
+        op_margin = _extract(fin, ['operatingMargins'])
+        if op_margin is not None and revenue is not None and revenue > 0:
+            ebit = op_margin * revenue
     interest_expense  = _extract(income, ['interestExpense'])
     interest_coverage = None
     if ebit is not None and interest_expense is not None and interest_expense != 0:
@@ -242,6 +250,8 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     current_ratio = (current_assets / current_liabilities
                      if current_assets is not None and current_liabilities and current_liabilities > 0
                      else None)
+    if current_ratio is None:
+        current_ratio = _extract(fin, ['currentRatio'])
 
     eps_growth = _extract(fin, ['earningsGrowth'])
     if eps_growth is None and len(income_list) >= 2:
@@ -262,6 +272,8 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
                 roes.append(ni_i / eq_i)
         if roes:
             roe_3yr_avg = sum(roes) / len(roes)
+    if roe_3yr_avg is None:
+        roe_3yr_avg = roe
 
     earnings_consistency = None
     if income_list:

@@ -23,7 +23,7 @@ _BASE_HEADERS = {
 _SUMMARY_MODULES = (
     'price,financialData,defaultKeyStatistics,summaryDetail,'
     'incomeStatementHistory,cashflowStatementHistory,balanceSheetHistory,'
-    'summaryProfile'
+    'balanceSheetHistoryQuarterly,summaryProfile'
 )
 
 _YAHOO_BASES = [
