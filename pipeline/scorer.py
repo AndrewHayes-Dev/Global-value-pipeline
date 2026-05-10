@@ -47,7 +47,8 @@ _BANK_INDUSTRIES = {
 
 
 def quality_score(*, fcf_margin, capex_intensity, gross_margin,
-                  shareholder_yield, roe_avg, ev_ebit) -> float:
+                  shareholder_yield, roe_avg, ev_ebit,
+                  op_margin=None, gm_trend=None) -> float:
     score = 0.0
 
     if fcf_margin is not None:
@@ -86,7 +87,19 @@ def quality_score(*, fcf_margin, capex_intensity, gross_margin,
         elif ev_ebit <= 18: score += 6
         elif ev_ebit <= 25: score += 2
 
-    _MAX_QUALITY = 105.0
+    if op_margin is not None and op_margin > 0:
+        if op_margin >= 0.25:   score += 20
+        elif op_margin >= 0.20: score += 15
+        elif op_margin >= 0.15: score += 10
+        elif op_margin >= 0.10: score += 5
+        elif op_margin >= 0.05: score += 2
+
+    if gm_trend is not None:
+        if gm_trend >= 0.05:    score += 5
+        elif gm_trend >= -0.02: score += 3
+        elif gm_trend >= -0.10: score += 1
+
+    _MAX_QUALITY = 130.0
     return round(min(100.0, max(0.0, score / _MAX_QUALITY * 100.0)), 1)
 
 def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
@@ -95,7 +108,7 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
                   gross_margin=None, current_ratio=None, eps_growth=None,
                   roe_3yr_avg=None, earnings_consistency=None,
                   book_value_growth=None, net_net_ratio=None,
-                  revenue_growth=None, industry: str = '') -> float:
+                  revenue_growth=None, ps_ratio=None, industry: str = '') -> float:
     score = 0.0
     is_bank = industry in _BANK_INDUSTRIES
 
@@ -196,7 +209,12 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
         elif revenue_growth >= 0.07: score += 3
         elif revenue_growth > 0:     score += 1
 
-    _MAX_RAW_SCORE = 134.0 if is_bank else 164.0
+    if ps_ratio is not None and ps_ratio > 0:
+        if ps_ratio <= 1.0:   score += 8
+        elif ps_ratio <= 2.0: score += 5
+        elif ps_ratio <= 3.0: score += 2
+
+    _MAX_RAW_SCORE = 142.0 if is_bank else 172.0
     return round(min(100.0, max(0.0, score / _MAX_RAW_SCORE * 100.0)), 1)
 
 
@@ -282,12 +300,14 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
 
     roe       = _extract(fin, ['returnOnEquity'])
     peg_ratio = _extract(key_stats, ['pegRatio'])
+    op_margin = _extract(fin, ['operatingMargins'])
+
     ebit = (_extract(income, ['ebit']) or
             _extract(income, ['operatingIncome']))
-    if ebit is None:
-        op_margin = _extract(fin, ['operatingMargins'])
-        if op_margin is not None and revenue is not None and revenue > 0:
-            ebit = op_margin * revenue
+    if ebit is None and op_margin is not None and revenue is not None and revenue > 0:
+        ebit = op_margin * revenue
+    elif ebit is not None and op_margin is None and revenue and revenue > 0:
+        op_margin = ebit / revenue
     interest_expense  = _extract(income, ['interestExpense'])
     interest_coverage = None
     if ebit is not None and interest_expense is not None and interest_expense != 0:
@@ -296,6 +316,17 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     gross_profit = _extract(income, ['grossProfit'])
     gross_margin = (gross_profit / revenue
                     if gross_profit is not None and revenue and revenue > 0 else None)
+
+    gm_trend = None
+    if len(income_list) >= 2:
+        gm_series = []
+        for inc in income_list:
+            gp = _extract(inc, ['grossProfit'])
+            rv = _extract(inc, ['totalRevenue'])
+            if gp is not None and rv and rv > 0:
+                gm_series.append(gp / rv)
+        if len(gm_series) >= 2:
+            gm_trend = (gm_series[0] - gm_series[-1]) / abs(gm_series[-1])
 
     current_assets      = _extract(balance, ['totalCurrentAssets'])
     current_liabilities = _extract(balance, ['totalCurrentLiabilities'])
@@ -381,6 +412,10 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if free_cash_flow is not None and mc_for_yield and mc_for_yield > 0:
         fcf_yield = free_cash_flow / mc_for_yield
 
+    ps_ratio = None
+    if market_cap is not None and revenue and revenue > 0:
+        ps_ratio = market_cap / revenue
+
     # ── Quality metrics ───────────────────────────────────────────────────────
     fcf_margin = None
     if free_cash_flow is not None and revenue and revenue > 0:
@@ -422,13 +457,14 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         eps_growth=eps_growth, roe_3yr_avg=roe_3yr_avg,
         earnings_consistency=earnings_consistency,
         book_value_growth=book_value_growth, net_net_ratio=net_net_ratio,
-        revenue_growth=revenue_growth, industry=industry,
+        revenue_growth=revenue_growth, ps_ratio=ps_ratio, industry=industry,
     )
 
     q_score = quality_score(
         fcf_margin=fcf_margin, capex_intensity=capex_intensity,
         gross_margin=gross_margin, shareholder_yield=shareholder_yield,
         roe_avg=roe_3yr_avg, ev_ebit=ev_ebit,
+        op_margin=op_margin, gm_trend=gm_trend,
     )
 
     blended_score = round(0.6 * score + 0.4 * q_score, 1)
@@ -470,6 +506,9 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         'capex_intensity':       capex_intensity,
         'shareholder_yield':     shareholder_yield,
         'ev_ebit':               ev_ebit,
+        'ps_ratio':              ps_ratio,
+        'operating_margin':      op_margin,
+        'gross_margin_trend':    gm_trend,
     }
 
 
@@ -538,6 +577,7 @@ def enrich_from_edgar(stock: dict, edgar_data: Optional[dict]) -> dict:
         book_value_growth=book_value_growth,
         net_net_ratio=net_net_ratio,
         revenue_growth=stock.get('revenue_growth'),
+        ps_ratio=stock.get('ps_ratio'),
     )
 
     return {**stock, 'score': new_score,
@@ -627,6 +667,7 @@ def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) ->
         book_value_growth=book_value_growth,
         net_net_ratio=net_net_ratio,
         revenue_growth=stock.get('revenue_growth'),
+        ps_ratio=stock.get('ps_ratio'),
     )
 
     return {**stock, 'pe_ratio': pe, 'pb_ratio': pb, 'dividend_yield': div_yield,

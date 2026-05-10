@@ -277,6 +277,9 @@ def _format_stock(s: dict, rank: int) -> dict:
         'capex_intensity':      s.get('capex_intensity'),
         'shareholder_yield':    s.get('shareholder_yield'),
         'ev_ebit':              s.get('ev_ebit'),
+        'ps_ratio':             s.get('ps_ratio'),
+        'operating_margin':     s.get('operating_margin'),
+        'gross_margin_trend':   s.get('gross_margin_trend'),
     }
 
 
