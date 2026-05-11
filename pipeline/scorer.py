@@ -325,7 +325,7 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
             rv = _extract(inc, ['totalRevenue'])
             if gp is not None and rv and rv > 0:
                 gm_series.append(gp / rv)
-        if len(gm_series) >= 2:
+        if len(gm_series) >= 2 and gm_series[-1] != 0:
             gm_trend = (gm_series[0] - gm_series[-1]) / abs(gm_series[-1])
 
     current_assets      = _extract(balance, ['totalCurrentAssets'])
