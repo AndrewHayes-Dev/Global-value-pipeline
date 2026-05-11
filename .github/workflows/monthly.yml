@@ -29,4 +29,5 @@ jobs:
           GLOBAL_R2_ACCESS_KEY_ID:    ${{ secrets.GLOBAL_R2_ACCESS_KEY_ID }}
           GLOBAL_R2_SECRET_ACCESS_KEY: ${{ secrets.GLOBAL_R2_SECRET_ACCESS_KEY }}
           GLOBAL_R2_BUCKET_NAME:      global-investor-data
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
         run: python pipeline/main.py
