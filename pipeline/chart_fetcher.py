@@ -1,6 +1,7 @@
 # pipeline/chart_fetcher.py
-# Fetches Yahoo Finance chart data (all 4 periods) for rank 1-20 stocks from
-# every index, deduplicates, and uploads charts/daily.json to R2.
+# Fetches Yahoo Finance chart data (all 4 periods) for rank 1-20 stocks and
+# uploads charts/daily-au.json (ASX) or charts/daily-us.json (US) to R2.
+# Controlled by the MARKET env var: AU or US.
 
 import json
 import os
@@ -15,14 +16,22 @@ from botocore.config import Config
 
 from uploader import upload_json
 
+MARKET = os.environ.get('MARKET', 'US').upper()
+
 # R2 stock files produced by the monthly pipeline, with is_asx flag
-_STOCK_FILES = {
+_AU_STOCK_FILES = {
+    'stocks/xao.json': True,
+}
+
+_US_STOCK_FILES = {
     'stocks/sp500.json':       False,
     'stocks/djia.json':        False,
     'stocks/nasdaq.json':      False,
     'stocks/russell2000.json': False,
-    'stocks/xao.json':         True,
 }
+
+_STOCK_FILES = _AU_STOCK_FILES if MARKET == 'AU' else _US_STOCK_FILES
+_OUTPUT_KEY  = 'charts/daily-au.json' if MARKET == 'AU' else 'charts/daily-us.json'
 
 # Yahoo Finance chart periods: (range, interval)
 _PERIODS = [
@@ -79,7 +88,7 @@ def _download_json(client, bucket: str, key: str):
 def _collect_tickers(client, bucket: str) -> list[tuple[str, str]]:
     """Return [(cache_key, yahoo_symbol), ...] deduplicated by yahoo_symbol.
 
-    cache_key is stored in charts/daily.json and used by the Flutter app.
+    cache_key is stored in the chart JSON and used by the Flutter app.
     yahoo_symbol is what we pass to the Yahoo Finance chart API.
     ASX tickers are stored without .AX in R2 but need .AX for Yahoo.
     """
@@ -156,6 +165,7 @@ def main():
     bucket = os.environ.get('GLOBAL_R2_BUCKET_NAME', 'global-investor-data')
     client = _r2_client()
 
+    print(f'MARKET={MARKET}, output={_OUTPUT_KEY}')
     print('Step 1: Collecting ranked tickers from R2...')
     tickers = _collect_tickers(client, bucket)
     if not tickers:
@@ -182,11 +192,19 @@ def main():
         'stocks': stocks_data,
     }
 
-    print('Step 3: Uploading charts/daily.json to R2...')
-    success = upload_json('charts/daily.json', payload, bucket)
+    print(f'Step 3: Uploading {_OUTPUT_KEY} to R2...')
+    success = upload_json(_OUTPUT_KEY, payload, bucket)
     if not success:
         print('ERROR: Upload failed')
         sys.exit(1)
+
+    # Remove the old combined file on first successful run (idempotent).
+    try:
+        client.delete_object(Bucket=bucket, Key='charts/daily.json')
+        print('Cleaned up legacy charts/daily.json from R2.')
+    except Exception:
+        pass
+
     print(f'Done — {len(stocks_data)} stocks, {len(_PERIODS)} periods each.')
 
 
