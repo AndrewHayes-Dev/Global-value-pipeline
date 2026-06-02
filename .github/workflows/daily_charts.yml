@@ -2,13 +2,16 @@ name: Daily Chart Data
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'
+    - cron: '0 7 * * 1-5'   # AU: 07:00 UTC = 5 PM AEST (after ASX close)
+    - cron: '30 21 * * 1-5' # US: 21:30 UTC = 5:30 PM EDT (after NYSE/NASDAQ close)
   workflow_dispatch:
 
 jobs:
-  charts:
+  charts-au:
+    name: AU Charts (ASX)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 7 * * 1-5'
 
     steps:
       - name: Checkout
@@ -22,8 +25,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Fetch and upload chart data
+      - name: Fetch and upload AU chart data
         env:
+          MARKET:                      AU
+          CLOUDFLARE_ACCOUNT_ID:       ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GLOBAL_R2_ACCESS_KEY_ID:     ${{ secrets.GLOBAL_R2_ACCESS_KEY_ID }}
+          GLOBAL_R2_SECRET_ACCESS_KEY: ${{ secrets.GLOBAL_R2_SECRET_ACCESS_KEY }}
+          GLOBAL_R2_BUCKET_NAME:       global-investor-data
+        run: python pipeline/chart_fetcher.py
+
+  charts-us:
+    name: US Charts (NYSE/NASDAQ)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 21 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch and upload US chart data
+        env:
+          MARKET:                      US
           CLOUDFLARE_ACCOUNT_ID:       ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           GLOBAL_R2_ACCESS_KEY_ID:     ${{ secrets.GLOBAL_R2_ACCESS_KEY_ID }}
           GLOBAL_R2_SECRET_ACCESS_KEY: ${{ secrets.GLOBAL_R2_SECRET_ACCESS_KEY }}
