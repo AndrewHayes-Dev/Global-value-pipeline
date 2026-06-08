@@ -111,7 +111,7 @@ class YHFinanceFetcher:
         ]
 
         raw: dict = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
             futures = {ex.submit(self._fetch_module, symbol, m): m for m in all_modules}
             for future in concurrent.futures.as_completed(futures):
                 mod = futures[future]
