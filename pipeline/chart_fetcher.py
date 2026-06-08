@@ -1,5 +1,5 @@
 # pipeline/chart_fetcher.py
-# Fetches Yahoo Finance chart data (all 4 periods) for rank 1-20 stocks and
+# Fetches YH Finance chart data (all 4 periods) for rank 1-20 stocks and
 # uploads charts/daily-au.json (ASX) or charts/daily-us.json (US) to R2.
 # Controlled by the MARKET env var: AU or US.
 
@@ -33,30 +33,28 @@ _US_STOCK_FILES = {
 _STOCK_FILES = _AU_STOCK_FILES if MARKET == 'AU' else _US_STOCK_FILES
 _OUTPUT_KEY  = 'charts/daily-au.json' if MARKET == 'AU' else 'charts/daily-us.json'
 
-# Yahoo Finance chart periods: (range, interval)
+# Yahoo Finance chart periods: (range_key, interval, trailing_record_count)
+# YH Finance /api/v2/markets/stock/history returns 640 records oldest-first;
+# we take the last N entries for the requested time window.
 _PERIODS = [
-    ('5d',  '1h'),
-    ('3mo', '1d'),
-    ('1y',  '1d'),
-    ('3y',  '1wk'),
+    ('5d',  '1h',  35),   # ~5 trading days × 7 hourly bars
+    ('3mo', '1d',  65),   # ~3 months of daily bars
+    ('1y',  '1d', 252),   # ~1 year of daily bars
+    ('3y',  '1wk',156),   # ~3 years of weekly bars
 ]
 
 _MAX_RANK      = 20
-_REQUEST_DELAY = 0.2   # seconds between Yahoo requests
+_REQUEST_DELAY = 0.25  # seconds between RapidAPI requests
 _TIMEOUT       = 30    # seconds per HTTP request
 _RETRY_DELAY   = 5     # seconds to wait after a 429
 
-_BASE_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Safari/537.36'
-    ),
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Origin': 'https://finance.yahoo.com',
-    'Referer': 'https://finance.yahoo.com/',
+_RAPID_KEY  = 'fdb3e64a86msh9c5f4c5e59cf7a6p1dd3dcjsn1f9e68aa290b'
+_RAPID_HOST = 'yahoo-finance15.p.rapidapi.com'
+_RAPID_BASE = 'https://yahoo-finance15.p.rapidapi.com'
+_RAPID_HEADERS = {
+    'x-rapidapi-key':  _RAPID_KEY,
+    'x-rapidapi-host': _RAPID_HOST,
+    'Content-Type':    'application/json',
 }
 
 
@@ -85,15 +83,15 @@ def _download_json(client, bucket: str, key: str):
 
 # ── Ticker collection ─────────────────────────────────────────────────────────
 
-def _collect_tickers(client, bucket: str) -> list[tuple[str, str]]:
+def _collect_tickers(client, bucket: str) -> list:
     """Return [(cache_key, yahoo_symbol), ...] deduplicated by yahoo_symbol.
 
     cache_key is stored in the chart JSON and used by the Flutter app.
-    yahoo_symbol is what we pass to the Yahoo Finance chart API.
-    ASX tickers are stored without .AX in R2 but need .AX for Yahoo.
+    yahoo_symbol is what we pass to the YH Finance chart API.
+    ASX tickers are stored without .AX in R2 but need .AX for YH Finance.
     """
-    seen_yahoo: set[str] = set()
-    result: list[tuple[str, str]] = []
+    seen_yahoo: set = set()
+    result: list = []
 
     for key, is_asx in _STOCK_FILES.items():
         data = _download_json(client, bucket, key)
@@ -115,47 +113,41 @@ def _collect_tickers(client, bucket: str) -> list[tuple[str, str]]:
     return result
 
 
-# ── Yahoo Finance chart fetch ─────────────────────────────────────────────────
+# ── YH Finance chart fetch ────────────────────────────────────────────────────
 
 def _fetch_chart(
     session: requests.Session,
     yahoo_symbol: str,
-    range_: str,
     interval: str,
+    keep: int,
 ) -> list:
-    """Return [[timestamp_seconds, price], ...] oldest-first, or [] on failure."""
+    """Return [[timestamp_seconds, price], ...] oldest-first (last `keep` records), or [] on failure."""
     try:
         encoded = urllib.parse.quote(yahoo_symbol)
-        url = (
-            f'https://query1.finance.yahoo.com/v8/finance/chart/{encoded}'
-            f'?interval={interval}&range={range_}'
-        )
-        r = session.get(url, headers=_BASE_HEADERS, timeout=_TIMEOUT)
+        url = (f'{_RAPID_BASE}/api/v2/markets/stock/history'
+               f'?symbol={encoded}&interval={interval}')
+        r = session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 429:
             print(f'    Rate limited — retrying after {_RETRY_DELAY}s')
             time.sleep(_RETRY_DELAY)
-            r = session.get(url, headers=_BASE_HEADERS, timeout=_TIMEOUT)
+            r = session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
         if r.status_code != 200:
-            print(f'    HTTP {r.status_code} [{yahoo_symbol}/{range_}]')
+            print(f'    HTTP {r.status_code} [{yahoo_symbol}/{interval}]')
             return []
-        data = r.json()
-        results = (data.get('chart') or {}).get('result') or []
-        if not results:
+        body = r.json().get('body')
+        if not isinstance(body, list) or not body:
             return []
-        result     = results[0]
-        timestamps = result.get('timestamp') or []
-        closes     = (
-            (result.get('indicators') or {})
-            .get('quote', [{}])[0]
-            .get('close') or []
-        )
+        # body is sorted oldest-first; take the most recent `keep` records
+        slice_ = body[-keep:] if len(body) > keep else body
         points = []
-        for ts, price in zip(timestamps, closes):
-            if price is not None:
+        for entry in slice_:
+            ts    = entry.get('timestamp_unix')
+            price = entry.get('close')
+            if ts is not None and price is not None:
                 points.append([int(ts), round(float(price), 4)])
         return points
     except Exception as e:
-        print(f'    Chart error [{yahoo_symbol}/{range_}]: {e}')
+        print(f'    Chart error [{yahoo_symbol}/{interval}]: {e}')
         return []
 
 
@@ -179,12 +171,24 @@ def main():
         f'Step 2: Fetching chart data for {len(tickers)} tickers '
         f'× {len(_PERIODS)} periods...'
     )
+    # Deduplicate interval calls: 1d is used for both 3mo and 1y.
+    # Fetch each unique interval once, then slice to produce each range key.
     for i, (cache_key, yahoo_symbol) in enumerate(tickers, 1):
         print(f'  [{i}/{len(tickers)}] {yahoo_symbol}')
-        periods_data: dict = {}
-        for range_, interval in _PERIODS:
+        # Fetch 1h (5d), 1d (3mo + 1y), 1wk (3y) — 3 calls instead of 4
+        raw: dict = {}
+        for interval in ('1h', '1d', '1wk'):
             time.sleep(_REQUEST_DELAY)
-            periods_data[range_] = _fetch_chart(session, yahoo_symbol, range_, interval)
+            keep_max = max(
+                keep for _, ivl, keep in _PERIODS if ivl == interval
+            )
+            raw[interval] = _fetch_chart(session, yahoo_symbol, interval, keep_max)
+
+        periods_data: dict = {}
+        for range_key, interval, keep in _PERIODS:
+            all_pts = raw.get(interval, [])
+            periods_data[range_key] = all_pts[-keep:] if len(all_pts) > keep else all_pts
+
         stocks_data[cache_key] = periods_data
 
     payload = {
