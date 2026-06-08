@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from fetcher import YahooFetcher, FmpFetcher, EdgarFetcher, fetch_xao, WikipediaScraper
+from fetcher import YHFinanceFetcher, FmpFetcher, EdgarFetcher, fetch_xao, WikipediaScraper
 from scorer import score_from_summary, enrich_from_fmp, enrich_from_edgar
 from uploader import upload_json
 from generate_stock_spreadsheets import generate_all as generate_spreadsheets
@@ -41,7 +41,7 @@ def _fmt_vol(n):
 
 # ── Index quote ───────────────────────────────────────────────────────────────
 
-def process_index_quote(yahoo: YahooFetcher, fmp: FmpFetcher, index_def: dict) -> dict:
+def process_index_quote(yahoo: YHFinanceFetcher, fmp: FmpFetcher, index_def: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     q = yahoo.chart(index_def['yahoo'])
 
@@ -88,7 +88,7 @@ def process_index_quote(yahoo: YahooFetcher, fmp: FmpFetcher, index_def: dict) -
 
 # ── Price trend filter ────────────────────────────────────────────────────────
 
-def _has_upward_price_trend(yahoo: YahooFetcher, symbol: str) -> bool:
+def _has_upward_price_trend(yahoo: YHFinanceFetcher, symbol: str) -> bool:
     """Return True if current price > price ~2 years ago."""
     prices = yahoo.price_trend_check(symbol)
     if prices is None:
@@ -120,7 +120,7 @@ def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
 
 # ── Process one US sector ─────────────────────────────────────────────────────
 
-def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
+def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                       sector_id: str, sector_name: str,
                       sector_constituents: list[dict],
                       index_id: str) -> dict:
@@ -174,7 +174,7 @@ def process_us_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
 
 # ── Process Russell 2000 sector (curated tickers) ────────────────────────────
 
-def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
+def process_r2k_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                         sector_id: str, sector_name: str,
                         tickers: list[str]) -> dict:
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
@@ -215,7 +215,7 @@ def process_r2k_sector(yahoo: YahooFetcher, fmp: FmpFetcher, edgar: EdgarFetcher
 
 # ── Process XAO sector ────────────────────────────────────────────────────────
 
-def process_xao_sector(yahoo: YahooFetcher, sector_id: str, sector_name: str,
+def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str,
                         tickers: list[str], sector_industries: dict) -> dict:
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
     scored = []
@@ -291,7 +291,7 @@ def main():
     now_utc  = datetime.now(timezone.utc).isoformat()
     print(f'\n=== Global Value Pipeline — {now_utc} ===\n')
 
-    yahoo  = YahooFetcher()
+    yahoo  = YHFinanceFetcher()
     fmp    = FmpFetcher(FMP_KEY)
     wiki   = WikipediaScraper()
     edgar  = EdgarFetcher()
