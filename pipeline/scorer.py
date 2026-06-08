@@ -343,6 +343,9 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         if ni0 is not None and ni1 is not None and ni1 != 0:
             eps_growth = (ni0 - ni1) / abs(ni1)
 
+    if peg_ratio is None and pe is not None and pe > 0 and eps_growth is not None and eps_growth > 0:
+        peg_ratio = pe / (eps_growth * 100)
+
     roe_3yr_avg = None
     if income_list and bal_list:
         roes = []
