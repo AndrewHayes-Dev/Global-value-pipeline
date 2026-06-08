@@ -174,13 +174,34 @@ class YHFinanceFetcher:
             if 'totalStockholderEquity' in row:
                 row['stockholdersEquity'] = row['totalStockholderEquity']
 
-        # ── Fallback: standard income-statement for ASX stocks (v2 returns empty) ──
+        # ── Fallback: standard modules for ASX stocks (v2 returns empty) ──────────
         if not inc_rows:
             fallback = income_std.get('incomeStatementHistory')
             if isinstance(fallback, list):
                 inc_rows = fallback
             elif isinstance(fallback, dict):
                 inc_rows = fallback.get('incomeStatementHistory') or []
+
+        if not bs_rows:
+            bs_std = self._fetch_module(symbol, 'balance-sheet')
+            if bs_std:
+                fallback = bs_std.get('balanceSheetHistory')
+                if isinstance(fallback, list):
+                    bs_rows = fallback
+                elif isinstance(fallback, dict):
+                    bs_rows = fallback.get('balanceSheetStatements') or []
+                for row in bs_rows:
+                    if 'totalStockholderEquity' in row:
+                        row['stockholdersEquity'] = row['totalStockholderEquity']
+
+        if not cf_rows:
+            cf_std = self._fetch_module(symbol, 'cash-flow-statement')
+            if cf_std:
+                fallback = cf_std.get('cashflowStatementHistory')
+                if isinstance(fallback, list):
+                    cf_rows = fallback
+                elif isinstance(fallback, dict):
+                    cf_rows = fallback.get('cashflowStatements') or []
 
         # ── price / summaryDetail from fin + stats ────────────────────────────
         long_name = profile.get('longName') or ''
