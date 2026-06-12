@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from fetcher import YHFinanceFetcher, FmpFetcher, EdgarFetcher, fetch_xao, fetch_iwm_constituents, WikipediaScraper
+from fetcher import YHFinanceFetcher, FmpFetcher, EdgarFetcher, fetch_ioz_constituents, fetch_iwm_constituents, WikipediaScraper
 from scorer import score_from_summary, enrich_from_fmp, enrich_from_edgar
 from uploader import upload_json
 from generate_stock_spreadsheets import generate_all as generate_spreadsheets
@@ -175,7 +175,8 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
 # ── Process XAO sector ────────────────────────────────────────────────────────────────────────────────────
 
 def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str,
-                        tickers: list[str], sector_industries: dict) -> dict:
+                        tickers: list[str], sector_industries: dict,
+                        top_n: int = 20) -> dict:
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
     scored = []
 
@@ -257,27 +258,12 @@ def main():
     print('Loading EDGAR ticker map...')
     edgar.warm_up()
 
-    # ── XAO universe ────────────────────────────────────────────────────────────────────────────────────
-    print('Fetching XAO stock universe...')
-    xao_raw = fetch_xao()
-    xao_sector_map: dict[str, list[str]] = {}       # suffix → [tickers]
-    xao_industry_map: dict[str, str]     = {}       # ticker → industry
-
-    if xao_raw:
-        for entry in xao_raw.get('stocks', []):
-            ticker   = entry.get('ticker')
-            gics     = entry.get('sector')
-            industry = entry.get('industry', '')
-            if ticker and gics:
-                suffix = GICS_TO_SUFFIX.get(gics)
-                if suffix:
-                    xao_sector_map.setdefault(suffix, []).append(ticker)
-                    xao_industry_map[ticker] = industry
-        count = sum(len(v) for v in xao_sector_map.values())
-        print(f'  XAO loaded: {count} stocks across {len(xao_sector_map)} sectors')
-        upload_json('xao.json', xao_raw, BUCKET)
-    else:
-        print('  WARNING: XAO unavailable — XAO sectors will be empty')
+    # ── XAO dynamic constituents ──────────────────────────────────────────────────────────────────────────
+    print('Fetching XAO stock universe from iShares IOZ...')
+    ioz_constituents = fetch_ioz_constituents(top_n=200)
+    ioz_by_sector    = _group_by_sector(ioz_constituents, 'xao')
+    count = sum(len(v['stocks']) for v in ioz_by_sector.values())
+    print(f'  IOZ loaded: {count} stocks across {len(ioz_by_sector)} sectors')
 
     # ── US dynamic constituents ───────────────────────────────────────────────────────────────────────
     print('\nScraping US index constituents from Wikipedia...')
@@ -312,12 +298,15 @@ def main():
 
         if idx['id'] == 'xao':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
-                sector_id = f'xao_{suffix}'
-                tickers   = xao_sector_map.get(suffix, [])
-                if not tickers:
+                sector_id        = f'xao_{suffix}'
+                sector_data      = ioz_by_sector.get(sector_id, {})
+                sector_stocks_list = sector_data.get('stocks', [])
+                if not sector_stocks_list:
                     sectors_out.append({'sector_id': sector_id, 'name': gics_name, 'stocks': []})
                     continue
-                sd = process_xao_sector(yahoo, sector_id, gics_name, tickers, xao_industry_map)
+                tickers      = [s['ticker'] for s in sector_stocks_list]
+                industry_map = {s['ticker']: s.get('industry', '') for s in sector_stocks_list}
+                sd = process_xao_sector(yahoo, sector_id, gics_name, tickers, industry_map)
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
