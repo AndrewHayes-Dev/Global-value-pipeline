@@ -1,6 +1,6 @@
 # pipeline/fetcher.py
 # YH Finance (yahoo-finance15) + FMP HTTP clients, Wikipedia constituent scraper.
-# IOZ PCF + ASX CSV for XAO constituents; IWM CSV for Russell 2000.
+# IOZ PCF + ASX CSV for XAO constituents; SSGA SPSM XLSX for Russell 2000 proxy.
 
 import calendar
 import concurrent.futures
@@ -456,160 +456,180 @@ class FmpFetcher:
 
 
 
-# ── IWM constituent fetcher ───────────────────────────────────────────────────
+# ── SPSM constituent fetcher (SSGA S&P 600 small-cap; Russell 2000 proxy) ────
+# iShares IWM is reliably blocked by Akamai on GitHub Actions; SSGA SPSM XLSX
+# is freely accessible and provides equivalent small-cap US sector coverage.
 
-_IWM_PRODUCT_URL = 'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf'
-_IWM_CSV_URL     = (
-    'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf'
-    '?fileType=csv&fileName=IWM_holdings&dataType=fund'
+_SPSM_XLSX_URL = (
+    'https://www.ssga.com/library-content/products/fund-data/etfs/us'
+    '/holdings-daily-us-en-spsm.xlsx'
 )
-_IWM_HEADERS = {
-    'User-Agent':      ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                        'AppleWebKit/537.36 (KHTML, like Gecko) '
-                        'Chrome/125.0.0.0 Safari/537.36'),
-    'Accept':          ('text/html,application/xhtml+xml,application/xml;q=0.9,'
-                        'image/avif,image/webp,*/*;q=0.8'),
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer':         'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf',
-    'DNT':             '1',
-    'Connection':      'keep-alive',
-    'Cache-Control':   'no-cache',
-    'Pragma':          'no-cache',
-    'Sec-Fetch-Dest':  'document',
-    'Sec-Fetch-Mode':  'navigate',
-    'Sec-Fetch-Site':  'same-origin',
-    'Upgrade-Insecure-Requests': '1',
+_SPSM_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/125.0.0.0 Safari/537.36'),
+    'Accept': ('application/vnd.openxmlformats-officedocument'
+               '.spreadsheetml.sheet,*/*;q=0.8'),
 }
 
-# Alternative AJAX endpoint — sometimes bypasses the Akamai/CDN bot gate
-_IWM_CSV_ALT_URL = (
-    'https://www.ishares.com/us/products/239710/'
-    'ishares-russell-2000-etf/1467271812596.ajax?tab=holdings&fileType=csv'
-)
+# Yahoo Finance sector names → GICS sector names used by the pipeline
+_YF_TO_GICS_SECTOR = {
+    'Technology':             'Information Technology',
+    'Healthcare':             'Health Care',
+    'Financial Services':     'Financials',
+    'Consumer Cyclical':      'Consumer Discretionary',
+    'Consumer Defensive':     'Consumer Staples',
+    'Industrials':            'Industrials',
+    'Energy':                 'Energy',
+    'Basic Materials':        'Materials',
+    'Utilities':              'Utilities',
+    'Real Estate':            'Real Estate',
+    'Communication Services': 'Communication Services',
+}
 
 
-def _iwm_parse(text: str, top_per_sector: int) -> list:
-    """Parse IWM holdings CSV text. Raises ValueError if Ticker header not found."""
-    import csv as _csv
-    from collections import defaultdict
+def _parse_spsm_xlsx(content: bytes) -> list:
+    """
+    Parse SSGA SPSM holdings XLSX using stdlib zipfile + xml.etree.
+    Handles sparse cell references correctly (empty cells may be absent).
+    No openpyxl dependency required.
+    """
+    import io
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
 
-    snippet = text[:300].strip()
-    if snippet.lower().startswith('<!') or snippet.lower().startswith('<html'):
-        raise ValueError(
-            f'IWM CSV: got HTML response instead of CSV — '
-            f'bot detection active. First 200 chars: {snippet[:200]!r}'
-        )
+    ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 
-    lines = text.splitlines()
-    header_idx = next(
-        (i for i, line in enumerate(lines)
-         if line.strip().lower().startswith('ticker')),
-        None,
-    )
-    if header_idx is None:
-        raise ValueError(
-            f'IWM CSV: could not locate Ticker header row. '
-            f'First 5 lines: {lines[:5]}'
-        )
+    def _col_idx(ref: str) -> int:
+        letters = re.sub(r'\d', '', ref).upper()
+        n = 0
+        for ch in letters:
+            n = n * 26 + (ord(ch) - 64)
+        return n - 1
 
-    reader = _csv.DictReader(lines[header_idx:])
-    by_sector: dict = defaultdict(list)
-    total_equity = 0
-    for row in reader:
-        if row.get('Asset Class', '').strip() != 'Equity':
-            continue
-        ticker = row.get('Ticker', '').strip()
-        if not ticker or ticker == '-':
-            continue
-        sector = row.get('Sector', '').strip()
-        if not sector:
-            continue
-        try:
-            market_value = float(row.get('Market Value', '0').replace(',', ''))
-        except (ValueError, AttributeError):
-            continue
-        by_sector[sector].append({
-            'ticker':       ticker,
-            'company_name': row.get('Name', '').strip(),
-            'gics_sector':  sector,
-            'market_value': market_value,
-        })
-        total_equity += 1
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        shared: list = []
+        if 'xl/sharedStrings.xml' in zf.namelist():
+            with zf.open('xl/sharedStrings.xml') as f:
+                ss = ET.parse(f)
+            for si in ss.getroot().findall('.//ns:si', ns):
+                shared.append(''.join(t.text or '' for t in si.findall('.//ns:t', ns)))
 
-    result = []
-    for sector, stocks in by_sector.items():
-        stocks.sort(key=lambda x: x['market_value'], reverse=True)
-        result.extend(stocks[:top_per_sector])
+        with zf.open('xl/worksheets/sheet1.xml') as f:
+            ws = ET.parse(f)
 
-    print(f'  IWM: {len(result)} stocks selected (top {top_per_sector} per sector '
-          f'across {len(by_sector)} sectors, from {total_equity} equity holdings)')
-    return result
+        rows: list = []
+        for row_el in ws.getroot().findall('.//ns:row', ns):
+            cells: dict = {}
+            for c in row_el.findall('ns:c', ns):
+                ci    = _col_idx(c.get('r', ''))
+                ctype = c.get('t', '')
+                v     = c.find('ns:v', ns)
+                if v is None or v.text is None:
+                    val: object = None
+                elif ctype == 's':
+                    idx = int(v.text)
+                    val = shared[idx] if idx < len(shared) else ''
+                else:
+                    try:
+                        val = float(v.text)
+                    except (ValueError, TypeError):
+                        val = v.text
+                cells[ci] = val
+            if cells:
+                mx = max(cells.keys())
+                rows.append([cells.get(i) for i in range(mx + 1)])
+
+    return rows
 
 
 def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
     """
-    Downloads the IWM holdings CSV from BlackRock iShares.
-    Pre-fetches the product page for session cookies, then tries the primary CSV
-    URL; on failure retries once after a longer delay, then tries an alternative
-    AJAX endpoint. Raises on complete failure — no static fallback.
+    Small-cap US constituents using SSGA SPSM (S&P 600) as a Russell 2000 proxy.
+    Downloads the SSGA holdings XLSX (no bot-detection), then enriches each
+    holding with Yahoo Finance sector data. Returns the top top_per_sector
+    stocks per GICS sector sorted by ETF weight.
     """
+    from collections import defaultdict
+
+    # ── Step 1: Download and parse SSGA SPSM holdings XLSX ───────────────────
+    print('  Fetching SSGA SPSM holdings XLSX (S&P 600 small-cap universe)...')
+    r = requests.get(_SPSM_XLSX_URL, headers=_SPSM_HEADERS, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f'SPSM XLSX: HTTP {r.status_code}')
+
+    rows = _parse_spsm_xlsx(r.content)
+
+    # Columns: Name=0, Ticker=1, Identifier=2, SEDOL=3, Weight=4
+    hdr_idx = next(
+        (i for i, row in enumerate(rows) if row and row[0] == 'Name'),
+        None,
+    )
+    if hdr_idx is None:
+        raise ValueError('SPSM XLSX: cannot find header row')
+
+    candidates = []
+    for row in rows[hdr_idx + 1:]:
+        if not row or len(row) < 5:
+            continue
+        ticker = row[1]
+        weight = row[4]
+        if not ticker or ticker == '-' or not isinstance(weight, float):
+            continue
+        candidates.append({
+            'ticker':       str(ticker).strip(),
+            'company_name': str(row[0] or '').strip(),
+            'weight':       weight,
+        })
+
+    candidates.sort(key=lambda x: x['weight'], reverse=True)
+    universe = candidates[:150]  # top 150 by weight covers all 11 GICS sectors
+    print(f'  SPSM: {len(candidates)} holdings; enriching top {len(universe)} with Yahoo Finance sector data')
+
+    # ── Step 2: Fetch Yahoo Finance sector for each stock (parallelised) ──────
     session = requests.Session()
 
-    # Pre-fetch product page to acquire session cookies
-    pre = session.get(_IWM_PRODUCT_URL, headers=_IWM_HEADERS, timeout=30)
-    pre.raise_for_status()
-    time.sleep(3)  # longer delay — Akamai needs time to accept the session
-
-    for attempt, url in enumerate([_IWM_CSV_URL, _IWM_CSV_ALT_URL], 1):
+    def _enrich(stock: dict) -> dict:
+        ticker = stock['ticker']
         try:
-            r = session.get(url, headers=_IWM_HEADERS, timeout=60)
-            r.raise_for_status()
-            return _iwm_parse(r.text, top_per_sector)
-        except ValueError as e:
-            print(f'  IWM attempt {attempt} failed: {e}')
-            if attempt == 1:
-                time.sleep(5)  # wait before trying the alt URL
+            encoded = urllib.parse.quote(ticker)
+            url = (f'{_RAPID_BASE}/api/v1/markets/stock/modules'
+                   f'?ticker={encoded}&module=asset-profile')
+            resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY)
+                resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 200:
+                body = resp.json().get('body') or {}
+                yf_sector   = body.get('sector', '')
+                gics_sector = _YF_TO_GICS_SECTOR.get(yf_sector, '')
+                return {
+                    **stock,
+                    'gics_sector':   gics_sector,
+                    'gics_industry': body.get('industry', ''),
+                }
         except Exception as e:
-            print(f'  IWM attempt {attempt} network error: {e}')
-            if attempt == 1:
-                time.sleep(5)
+            print(f'  SPSM sector [{ticker}]: {e}')
+        return {**stock, 'gics_sector': '', 'gics_industry': ''}
 
-    raise RuntimeError('IWM: all fetch attempts failed — Russell 2000 unavailable')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        enriched = list(ex.map(_enrich, universe))
 
-    # Parse from the header row onward; DictReader handles quoted commas in numbers
-    reader = _csv.DictReader(lines[header_idx:])
-    by_sector = defaultdict(list)
-    total_equity = 0
-    for row in reader:
-        if row.get('Asset Class', '').strip() != 'Equity':
-            continue
-        ticker = row.get('Ticker', '').strip()
-        if not ticker or ticker == '-':
-            continue
-        sector = row.get('Sector', '').strip()
-        if not sector:
-            continue
-        try:
-            market_value = float(row.get('Market Value', '0').replace(',', ''))
-        except (ValueError, AttributeError):
-            continue
-        by_sector[sector].append({
-            'ticker':       ticker,
-            'company_name': row.get('Name', '').strip(),
-            'gics_sector':  sector,
-            'market_value': market_value,
-        })
-        total_equity += 1
+    # ── Step 3: Group by GICS sector; top N per sector by weight ─────────────
+    by_sector: dict = defaultdict(list)
+    for stock in enriched:
+        sec = stock['gics_sector']
+        if sec:
+            by_sector[sec].append(stock)
 
-    # Take top N per sector by market value
     result = []
-    for sector, stocks in by_sector.items():
-        stocks.sort(key=lambda x: x['market_value'], reverse=True)
+    for sec, stocks in by_sector.items():
+        stocks.sort(key=lambda x: x['weight'], reverse=True)
         result.extend(stocks[:top_per_sector])
 
-    print(f'  IWM: {len(result)} stocks selected (top {top_per_sector} per sector '
-          f'across {len(by_sector)} sectors, from {total_equity} equity holdings)')
+    print(f'  SPSM: {len(result)} stocks selected (top {top_per_sector} per sector '
+          f'across {len(by_sector)} sectors)')
     return result
 
 
