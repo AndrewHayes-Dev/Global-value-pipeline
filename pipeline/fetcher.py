@@ -474,42 +474,108 @@ _IWM_HEADERS = {
     'Referer':         'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf',
     'DNT':             '1',
     'Connection':      'keep-alive',
+    'Cache-Control':   'no-cache',
+    'Pragma':          'no-cache',
+    'Sec-Fetch-Dest':  'document',
+    'Sec-Fetch-Mode':  'navigate',
+    'Sec-Fetch-Site':  'same-origin',
+    'Upgrade-Insecure-Requests': '1',
 }
+
+# Alternative AJAX endpoint — sometimes bypasses the Akamai/CDN bot gate
+_IWM_CSV_ALT_URL = (
+    'https://www.ishares.com/us/products/239710/'
+    'ishares-russell-2000-etf/1467271812596.ajax?tab=holdings&fileType=csv'
+)
+
+
+def _iwm_parse(text: str, top_per_sector: int) -> list:
+    """Parse IWM holdings CSV text. Raises ValueError if Ticker header not found."""
+    import csv as _csv
+    from collections import defaultdict
+
+    snippet = text[:300].strip()
+    if snippet.lower().startswith('<!') or snippet.lower().startswith('<html'):
+        raise ValueError(
+            f'IWM CSV: got HTML response instead of CSV — '
+            f'bot detection active. First 200 chars: {snippet[:200]!r}'
+        )
+
+    lines = text.splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines)
+         if line.strip().lower().startswith('ticker')),
+        None,
+    )
+    if header_idx is None:
+        raise ValueError(
+            f'IWM CSV: could not locate Ticker header row. '
+            f'First 5 lines: {lines[:5]}'
+        )
+
+    reader = _csv.DictReader(lines[header_idx:])
+    by_sector: dict = defaultdict(list)
+    total_equity = 0
+    for row in reader:
+        if row.get('Asset Class', '').strip() != 'Equity':
+            continue
+        ticker = row.get('Ticker', '').strip()
+        if not ticker or ticker == '-':
+            continue
+        sector = row.get('Sector', '').strip()
+        if not sector:
+            continue
+        try:
+            market_value = float(row.get('Market Value', '0').replace(',', ''))
+        except (ValueError, AttributeError):
+            continue
+        by_sector[sector].append({
+            'ticker':       ticker,
+            'company_name': row.get('Name', '').strip(),
+            'gics_sector':  sector,
+            'market_value': market_value,
+        })
+        total_equity += 1
+
+    result = []
+    for sector, stocks in by_sector.items():
+        stocks.sort(key=lambda x: x['market_value'], reverse=True)
+        result.extend(stocks[:top_per_sector])
+
+    print(f'  IWM: {len(result)} stocks selected (top {top_per_sector} per sector '
+          f'across {len(by_sector)} sectors, from {total_equity} equity holdings)')
+    return result
 
 
 def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
     """
     Downloads the IWM holdings CSV from BlackRock iShares.
-    Pre-fetches the product page to acquire session cookies, uses browser headers
-    to avoid 403. Filters to equity rows only, groups by GICS sector, and returns
-    the top_per_sector stocks by market value within each sector.
-    Sectors with fewer than top_per_sector stocks return all available.
-    Stocks with no recognisable GICS sector are discarded silently.
-    Returns list of dicts: {ticker, company_name, gics_sector, market_value}
-    Raises on any fetch or parse failure (no fallback by design).
+    Pre-fetches the product page for session cookies, then tries the primary CSV
+    URL; on failure retries once after a longer delay, then tries an alternative
+    AJAX endpoint. Raises on complete failure — no static fallback.
     """
-    import csv as _csv
-    from collections import defaultdict
-
     session = requests.Session()
 
-    # Visit the product page first to acquire session cookies
+    # Pre-fetch product page to acquire session cookies
     pre = session.get(_IWM_PRODUCT_URL, headers=_IWM_HEADERS, timeout=30)
     pre.raise_for_status()
-    time.sleep(1.5)
+    time.sleep(3)  # longer delay — Akamai needs time to accept the session
 
-    # Download the holdings CSV
-    r = session.get(_IWM_CSV_URL, headers=_IWM_HEADERS, timeout=60)
-    r.raise_for_status()
+    for attempt, url in enumerate([_IWM_CSV_URL, _IWM_CSV_ALT_URL], 1):
+        try:
+            r = session.get(url, headers=_IWM_HEADERS, timeout=60)
+            r.raise_for_status()
+            return _iwm_parse(r.text, top_per_sector)
+        except ValueError as e:
+            print(f'  IWM attempt {attempt} failed: {e}')
+            if attempt == 1:
+                time.sleep(5)  # wait before trying the alt URL
+        except Exception as e:
+            print(f'  IWM attempt {attempt} network error: {e}')
+            if attempt == 1:
+                time.sleep(5)
 
-    # Locate the data header row — iShares prepends fund metadata rows before it
-    lines = r.text.splitlines()
-    header_idx = next(
-        (i for i, line in enumerate(lines) if line.startswith('Ticker')),
-        None,
-    )
-    if header_idx is None:
-        raise ValueError('IWM CSV: could not locate Ticker header row')
+    raise RuntimeError('IWM: all fetch attempts failed — Russell 2000 unavailable')
 
     # Parse from the header row onward; DictReader handles quoted commas in numbers
     reader = _csv.DictReader(lines[header_idx:])
