@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from fetcher import YHFinanceFetcher, FmpFetcher, EdgarFetcher, fetch_xao, WikipediaScraper
+from fetcher import YHFinanceFetcher, FmpFetcher, EdgarFetcher, fetch_xao, fetch_iwm_constituents, WikipediaScraper
 from scorer import score_from_summary, enrich_from_fmp, enrich_from_edgar
 from uploader import upload_json
 from generate_stock_spreadsheets import generate_all as generate_spreadsheets
 from sector_stocks import (
     INDEX_DEFINITIONS, GICS_TO_SUFFIX, GICS_SECTORS_ORDERED,
-    RUSSELL2000_SECTOR_STOCKS, FMP_RATIOS_ALLOWED,
+    FMP_RATIOS_ALLOWED,
 )
 from notify import send_data_update_notification
 
@@ -39,7 +39,7 @@ def _fmt_vol(n):
     return str(n)
 
 
-# ── Index quote ───────────────────────────────────────────────────────────────
+# ── Index quote ────────────────────────────────────────────────────────────────────────────────
 
 def process_index_quote(yahoo: YHFinanceFetcher, fmp: FmpFetcher, index_def: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
@@ -86,7 +86,7 @@ def process_index_quote(yahoo: YHFinanceFetcher, fmp: FmpFetcher, index_def: dic
     return {'index_id': index_def['id'], 'name': index_def['name'], 'updated_at': now}
 
 
-# ── Price trend filter ────────────────────────────────────────────────────────
+# ── Price trend filter ────────────────────────────────────────────────────────────────────────────
 
 def _has_upward_price_trend(yahoo: YHFinanceFetcher, symbol: str) -> bool:
     """Return True if current price > price ~2 years ago."""
@@ -97,7 +97,7 @@ def _has_upward_price_trend(yahoo: YHFinanceFetcher, symbol: str) -> bool:
     return current_price > old_price
 
 
-# ── Group constituents by GICS sector ────────────────────────────────────────
+# ── Group constituents by GICS sector ────────────────────────────────────────────────────────────────────
 
 def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
     """Returns {sector_id: {'name': str, 'stocks': [{ticker, industry}]}}"""
@@ -118,7 +118,7 @@ def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
     return sector_map
 
 
-# ── Process one US sector ─────────────────────────────────────────────────────
+# ── Process one US sector ────────────────────────────────────────────────────────────────────────────────
 
 def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                       sector_id: str, sector_name: str,
@@ -172,48 +172,7 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
 
 
-# ── Process Russell 2000 sector (curated tickers) ────────────────────────────
-
-def process_r2k_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
-                        sector_id: str, sector_name: str,
-                        tickers: list[str]) -> dict:
-    print(f'    Screening {sector_id}: {len(tickers)} tickers')
-    scored = []
-
-    for ticker in tickers:
-        try:
-            if not _has_upward_price_trend(yahoo, ticker):
-                continue
-            time.sleep(0.3)
-            summary = yahoo.quote_summary(ticker)
-            stock = score_from_summary(ticker, summary, sector_id, 'russell2000') if summary else None
-            if stock:
-                scored.append(stock)
-        except Exception as e:
-            print(f'      Error [{ticker}]: {e}')
-        time.sleep(INTER_STOCK_DELAY)
-
-    scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
-    top20 = scored[:20]
-
-    enriched = []
-    for stock in top20:
-        if (stock.get('interest_coverage') is None or
-                stock.get('book_value_growth') is None or
-                stock.get('net_net_ratio') is None):
-            edgar_data = edgar.get_stock_data(stock['ticker'])
-            if edgar_data:
-                stock = enrich_from_edgar(stock, edgar_data)
-            time.sleep(0.1)
-        enriched.append(stock)
-
-    stocks_out = [_format_stock(s, rank) for rank, s in enumerate(enriched, 1)]
-    print(f'    Top {len(stocks_out)} for {sector_id}')
-    return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out,
-            'constituents_unavailable': False}
-
-
-# ── Process XAO sector ────────────────────────────────────────────────────────
+# ── Process XAO sector ────────────────────────────────────────────────────────────────────────────────────
 
 def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str,
                         tickers: list[str], sector_industries: dict) -> dict:
@@ -284,7 +243,7 @@ def _format_stock(s: dict, rank: int) -> dict:
     }
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────────────────────────────
 
 def main():
     start    = time.time()
@@ -298,7 +257,7 @@ def main():
     print('Loading EDGAR ticker map...')
     edgar.warm_up()
 
-    # ── XAO universe ─────────────────────────────────────────────────────────
+    # ── XAO universe ────────────────────────────────────────────────────────────────────────────────────
     print('Fetching XAO stock universe...')
     xao_raw = fetch_xao()
     xao_sector_map: dict[str, list[str]] = {}       # suffix → [tickers]
@@ -320,7 +279,7 @@ def main():
     else:
         print('  WARNING: XAO unavailable — XAO sectors will be empty')
 
-    # ── US dynamic constituents ───────────────────────────────────────────────
+    # ── US dynamic constituents ───────────────────────────────────────────────────────────────────────
     print('\nScraping US index constituents from Wikipedia...')
     sp500_constituents   = wiki.sp500()
     djia_constituents    = wiki.djia()
@@ -330,7 +289,12 @@ def main():
     djia_by_sector   = _group_by_sector(djia_constituents,   'djia')
     nasdaq_by_sector = _group_by_sector(nasdaq_constituents, 'nasdaq')
 
-    # ── Index quotes ─────────────────────────────────────────────────────────
+    # ── Russell 2000 dynamic constituents ───────────────────────────────────────────────────────────────
+    print('\nFetching Russell 2000 constituents from iShares IWM...')
+    r2k_constituents = fetch_iwm_constituents(top_n=150)
+    r2k_by_sector    = _group_by_sector(r2k_constituents, 'russell2000')
+
+    # ── Index quotes ──────────────────────────────────────────────────────────────────────────────────
     print('\nFetching index quotes...')
     indices_out = []
     for idx in INDEX_DEFINITIONS:
@@ -338,7 +302,7 @@ def main():
         indices_out.append(process_index_quote(yahoo, fmp, idx))
     upload_json('indices.json', indices_out, BUCKET)
 
-    # ── Sector stocks per index ───────────────────────────────────────────────
+    # ── Sector stocks per index ─────────────────────────────────────────────────────────────────────────────
     total_stocks   = 0
     all_index_data = {}
 
@@ -390,11 +354,11 @@ def main():
 
         elif idx['id'] == 'russell2000':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
-                sector_id = f'russell2000_{suffix}'
-                tickers   = RUSSELL2000_SECTOR_STOCKS.get(sector_id, [])
-                if not tickers:
+                sector_id    = f'russell2000_{suffix}'
+                constituents = r2k_by_sector.get(sector_id, {}).get('stocks', [])
+                if not constituents:
                     continue
-                sd = process_r2k_sector(yahoo, fmp, edgar, sector_id, gics_name, tickers)
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000')
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
@@ -406,10 +370,10 @@ def main():
         upload_json(f'stocks/{idx["id"]}.json', index_payload, BUCKET)
         all_index_data[idx['id']] = index_payload
 
-    # ── Spreadsheets ─────────────────────────────────────────────────────────
+    # ── Spreadsheets ──────────────────────────────────────────────────────────────────────────────────
     generate_spreadsheets(all_index_data, BUCKET)
 
-    # ── Metadata ─────────────────────────────────────────────────────────────
+    # ── Metadata ───────────────────────────────────────────────────────────────────────────────────────
     elapsed  = round(time.time() - start)
     metadata = {
         'last_updated':    now_utc,
