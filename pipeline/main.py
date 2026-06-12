@@ -277,8 +277,12 @@ def main():
 
     # ── Russell 2000 dynamic constituents ───────────────────────────────────────────────────────────────
     print('\nFetching Russell 2000 constituents from iShares IWM...')
-    r2k_constituents = fetch_iwm_constituents(top_per_sector=10)
-    r2k_by_sector    = _group_by_sector(r2k_constituents, 'russell2000')
+    try:
+        r2k_constituents = fetch_iwm_constituents(top_per_sector=10)
+    except Exception as e:
+        print(f'  WARNING: IWM fetch failed — Russell 2000 sectors will be empty: {e}')
+        r2k_constituents = []
+    r2k_by_sector = _group_by_sector(r2k_constituents, 'russell2000')
 
     # ── Index quotes ──────────────────────────────────────────────────────────────────────────────────
     print('\nFetching index quotes...')
