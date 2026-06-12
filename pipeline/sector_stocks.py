@@ -1,6 +1,6 @@
 # pipeline/sector_stocks.py
 # US sector definitions — S&P 500, DJIA, NASDAQ-100 stocks come from Wikipedia dynamically.
-# Russell 2000 remains curated (no free dynamic source available).
+# Russell 2000 constituents come from iShares IWM CSV (top 150 by market value, monthly).
 # XAO stocks come from AndrewHayes-Dev/XAO-data companion repo.
 
 # ── Index definitions ─────────────────────────────────────────────────────────
@@ -47,60 +47,6 @@ GICS_SECTORS_ORDERED = [
     ('Real Estate',            'realestate'),
     ('Materials',              'materials'),
 ]
-
-# ── Russell 2000 curated lists (no reliable free dynamic source) ──────────────
-
-RUSSELL2000_SECTOR_STOCKS = {
-    'russell2000_finance': [
-        'IBCP','CBTX','HTBI','STBA','FRST','CARE','PFIS','CIZN','ESSA','BSVN',
-        'BANR','CVBF','FIBK','GBCI','HIFS','NBTB','OCFC','PFSI','RNST','TOWN',
-        'AFCG','ACRE','AROW','ATAX','BFST','BHLB','BMRC','BRKL','BYFC','CADE',
-    ],
-    'russell2000_health': [
-        'ACAD','ACLS','ACHC','ADUS','AFMD','AGEN','AHCO','NEOG','OMCL','SUPN',
-        'HALO','INVA','LMNX','MDGL','PCRX','PRGO','SAGE','RCKT','ANIP','PAHC',
-        'ABCL','ACET','ACST','ADMA','ADPT','ADRO','AGIO','AKBA','AKRO','ALLO',
-    ],
-    'russell2000_industrials': [
-        'ABSI','ACHR','ACCO','ACMR','ACTG','HAYZ','HTLD','HURC','KFRC','MNTK',
-        'AEIS','BWXT','DXPE','NVEE','PRIM','CECO','HLIO','USLM','GMS','ARCB',
-        'AGYS','AHPI','AIRG','AIXI','ALGT','ALUS','AMRC','AMSF','AMTX','APOG',
-    ],
-    'russell2000_tech': [
-        'EGHT','BAND','CLFD','CODA','COHU','CRDO','DGII','DIOD','EDAP','FORM',
-        'HLIT','ICAD','MTSI','NABL','PDFS','POWI','RMBS','UCTT','VIAV','IIIV',
-        'ACMR','AEHR','AGYS','AIOT','ALRM','ALTR','ALYA','AMID','AMKR','AMMO',
-    ],
-    'russell2000_consumer_disc': [
-        'BOOT','BURL','BJ','CHUY','DINE','EAT','JACK','LZB','CENT','GIII',
-        'JILL','LOVE','PLAY','PLCE','REYN','SCVL','TILE','VSCO','PRTS','LESL',
-        'ACMR','AEIS','AGIO','AGYS','AHCO','AIXI','ALGT','ALUS','AMRC','AMTX',
-    ],
-    'russell2000_energy': [
-        'AMPY','CIVI','FLNG','GPRE','HESM','MGY','MNRL','NOG','BATL','CRK',
-        'EGY','KOS','PFIE','ROCC','SJT','VET','VTLE','SM','REX','TPVG',
-    ],
-    'russell2000_realestate': [
-        'ALEX','BRT','CLPR','CTRE','CUBE','GMRE','IIPR','INDUS','IRT',
-        'GOOD','NXRT','NTST','PLYM','SAFE','LAND','PINE','NLCP','MODV','REXR',
-    ],
-    'russell2000_materials': [
-        'ASIX','BCPC','CLF','CSTM','HAYN','HCCI','HUN','IOSP','KALU',
-        'MTRX','TROX','RYAM','POWL','MERC','GORO','USAP','ZEUS','KWR',
-    ],
-    'russell2000_consumer_staples': [
-        'ANDE','CALM','CVGW','DXYN','FLGT','FRPT','HAIN','HRMY','JJSF','LANC',
-        'LWAY','MGP','MGPI','NATR','NOMD','PZZA','RBCAA','RLGY','SAFM','SENEA',
-    ],
-    'russell2000_utilities': [
-        'ARTNA','AWR','CLNE','CNSL','CONN','CWCO','GWRS','MSEX','NWEC','PESI',
-        'SPWR','SRUN','SWX','TPVG','UONE','UONEK','UTL','YORW',
-    ],
-    'russell2000_comms': [
-        'ATNI','CNSL','CODA','FSRV','GFAI','HBCP','IRDM','LBRD','LBRDA','LBRDK',
-        'LSXMA','LSXMB','LSXMK','NXST','OOMA','SHEN','SIRI','STRP','TDS','TMUS',
-    ],
-}
 
 # ── FMP free plan symbols eligible for /stable/ratios ────────────────────────
 
