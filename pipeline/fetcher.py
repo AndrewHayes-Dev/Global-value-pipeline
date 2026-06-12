@@ -490,15 +490,19 @@ _IWM_HEADERS = {
 }
 
 
-def fetch_iwm_constituents(top_n: int = 150) -> list:
+def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
     """
     Downloads the IWM holdings CSV from BlackRock iShares.
     Pre-fetches the product page to acquire session cookies, uses browser headers
-    to avoid 403. Filters to equity rows only and returns the top_n by market value.
+    to avoid 403. Filters to equity rows only, groups by GICS sector, and returns
+    the top_per_sector stocks by market value within each sector.
+    Sectors with fewer than top_per_sector stocks return all available.
+    Stocks with no recognisable GICS sector are discarded silently.
     Returns list of dicts: {ticker, company_name, gics_sector, market_value}
     Raises on any fetch or parse failure (no fallback by design).
     """
     import csv as _csv
+    from collections import defaultdict
 
     session = requests.Session()
 
@@ -522,27 +526,37 @@ def fetch_iwm_constituents(top_n: int = 150) -> list:
 
     # Parse from the header row onward; DictReader handles quoted commas in numbers
     reader = _csv.DictReader(lines[header_idx:])
-    holdings = []
+    by_sector = defaultdict(list)
+    total_equity = 0
     for row in reader:
         if row.get('Asset Class', '').strip() != 'Equity':
             continue
         ticker = row.get('Ticker', '').strip()
         if not ticker or ticker == '-':
             continue
+        sector = row.get('Sector', '').strip()
+        if not sector:
+            continue
         try:
             market_value = float(row.get('Market Value', '0').replace(',', ''))
         except (ValueError, AttributeError):
             continue
-        holdings.append({
+        by_sector[sector].append({
             'ticker':       ticker,
             'company_name': row.get('Name', '').strip(),
-            'gics_sector':  row.get('Sector', '').strip(),
+            'gics_sector':  sector,
             'market_value': market_value,
         })
+        total_equity += 1
 
-    holdings.sort(key=lambda x: x['market_value'], reverse=True)
-    result = holdings[:top_n]
-    print(f'  IWM: {len(result)} of {len(holdings)} equity holdings selected (top {top_n} by market value)')
+    # Take top N per sector by market value
+    result = []
+    for sector, stocks in by_sector.items():
+        stocks.sort(key=lambda x: x['market_value'], reverse=True)
+        result.extend(stocks[:top_per_sector])
+
+    print(f'  IWM: {len(result)} stocks selected (top {top_per_sector} per sector '
+          f'across {len(by_sector)} sectors, from {total_equity} equity holdings)')
     return result
 
 class WikipediaScraper:
