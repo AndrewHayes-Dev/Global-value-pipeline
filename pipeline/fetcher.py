@@ -595,43 +595,73 @@ _GICS_INDUSTRY_GROUP_TO_SECTOR: dict = {
 
 
 def _isin_to_asx_ticker(isin: str) -> Optional[str]:
-    """Extract ASX ticker from a 12-char AU ISIN. e.g. AU000000BHP1 → BHP."""
+    """
+    Extract ASX ticker from a 12-char AU ISIN (e.g. AU000000BHP1 → BHP).
+    Returns None for numeric NSINs — those require name-based fallback.
+    """
     if not isin or not isin.startswith('AU') or len(isin) != 12:
         return None
     ticker = isin[2:11].lstrip('0')
-    return ticker if ticker and ticker.isalnum() else None
+    if not ticker or not ticker[0].isalpha() or not ticker.isalnum():
+        return None
+    return ticker
+
+
+def _normalize_asx_name(name: str) -> str:
+    """Normalise a company name for approximate matching against ASX CSV."""
+    name = name.upper().strip().rstrip('.,')  # strip trailing punctuation first
+    for suffix in (
+        ' LIMITED', ' LTD', ' STAPLED UNITS', ' STAPLED UNIT',
+        ' CDI INC', ' CDI CORP', ' CDI INC.', ' CDI',
+        ' CORPORATION', ' CORP', ' INC.', ' INC',
+        ' DEF', ' REIT', ' UNITS', ' UNIT',
+    ):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].rstrip()
+    return name
 
 
 def fetch_ioz_constituents(top_n: int = 200) -> list:
     """
     Downloads the IOZ PCF CSV from BlackRock Australia and the ASX Listed Companies
     CSV to assign GICS sectors. Pre-fetches the IOZ product page for session cookies.
+
+    IOZ PCF columns: PCF Date, Fund Name, Sedol, Security Name, Number of Shares,
+                     Security Price, ISIN  (all but first have a leading space).
+    Two-step ticker resolution:
+      1. Alpha ISIN → direct ticker extraction (most large-caps).
+      2. Numeric ISIN → normalised name match against ASX CSV company names.
+
     Returns list of {ticker, company_name, gics_sector, gics_industry, market_value}
     sorted by market_value descending, capped at top_n.
     Raises on any fetch or parse failure — no fallback.
     """
     import csv as _csv
 
-    # ── Step 1: ASX Listed Companies CSV → ticker → GICS industry group ──────
-    asx_map: dict = {}
+    # ── Step 1: ASX Listed Companies CSV → code→sector + name→code maps ──────
+    asx_sector: dict = {}   # asx_code (upper) → gics industry group
+    asx_name:   dict = {}   # normalised_company_name → asx_code (upper)
     try:
         asx_r = requests.get(_ASX_COMPANIES_URL, timeout=30)
         asx_r.raise_for_status()
         asx_lines = asx_r.text.splitlines()
-        header_idx = next(
+        hdr = next(
             (i for i, line in enumerate(asx_lines)
              if 'ASX code' in line or 'ASX Code' in line),
             None,
         )
-        if header_idx is not None:
-            reader = _csv.DictReader(asx_lines[header_idx:])
-            for row in reader:
+        if hdr is not None:
+            for row in _csv.DictReader(asx_lines[hdr:]):
                 code = (row.get('ASX code') or row.get('ASX Code') or '').strip().upper()
                 ig   = (row.get('GICS industry group') or
                         row.get('GICS Industry Group') or '').strip()
+                name = (row.get('Company name') or row.get('Company Name') or '').strip()
                 if code:
-                    asx_map[code] = ig
-        print(f'  ASX CSV: {len(asx_map)} listed companies loaded')
+                    asx_sector[code] = ig
+                    norm = _normalize_asx_name(name)
+                    if norm:
+                        asx_name[norm] = code
+        print(f'  ASX CSV: {len(asx_sector)} companies loaded')
     except Exception as e:
         raise RuntimeError(f'IOZ: ASX companies CSV failed: {e}')
 
@@ -645,40 +675,47 @@ def fetch_ioz_constituents(top_n: int = 200) -> list:
     r = session.get(_IOZ_PCF_URL, headers=_IOZ_HEADERS, timeout=60)
     r.raise_for_status()
 
-    # ── Step 4: Locate data header row and parse ──────────────────────────────
+    # ── Step 4: Find header row — contains both "ISIN" and "Sedol" ────────────
     lines = r.text.splitlines()
-    header_idx = next(
+    hdr = next(
         (i for i, line in enumerate(lines)
-         if 'ISIN' in line and ('NAME' in line or 'PRICE' in line)),
+         if 'ISIN' in line and 'Sedol' in line),
         None,
     )
-    if header_idx is None:
-        raise ValueError('IOZ PCF: could not locate ISIN header row')
+    if hdr is None:
+        raise ValueError('IOZ PCF: could not locate ISIN/Sedol header row')
 
-    reader = _csv.DictReader(lines[header_idx:])
+    # skipinitialspace strips the leading space from " Fund Name", " ISIN", etc.
+    reader = _csv.DictReader(lines[hdr:], skipinitialspace=True)
     stocks: list = []
-    skipped_no_sector = 0
+    skipped_no_ticker  = 0
+    skipped_no_sector  = 0
 
     for row in reader:
-        asset_class = row.get('ASSET CLASS', '').strip().lower()
-        if asset_class and asset_class not in ('equity', ''):
-            continue
-        isin = row.get('ISIN', '').strip()
-        name = row.get('NAME', '').strip()
+        isin    = (row.get('ISIN') or '').strip()
+        pcf_name = (row.get('Security Name') or '').strip()
         try:
-            qty   = float((row.get('PRICING BASKET QTY') or '0').replace(',', ''))
-            price = float((row.get('PRICE') or '0').replace(',', ''))
+            shares = float((row.get('Number of Shares') or '0').replace(',', ''))
+            price  = float((row.get('Security Price')   or '0').replace(',', ''))
         except (ValueError, AttributeError):
             continue
-        market_value = qty * price
+        market_value = shares * price
         if market_value <= 0:
             continue
 
+        # Step 4a: alpha ISIN → direct ticker
         ticker = _isin_to_asx_ticker(isin)
+
+        # Step 4b: numeric NSIN → normalised name lookup
+        if ticker is None:
+            norm = _normalize_asx_name(pcf_name)
+            ticker = asx_name.get(norm)
+
         if not ticker:
+            skipped_no_ticker += 1
             continue
 
-        industry_group = asx_map.get(ticker.upper(), '')
+        industry_group = asx_sector.get(ticker.upper(), '')
         gics_sector = _GICS_INDUSTRY_GROUP_TO_SECTOR.get(industry_group)
         if not gics_sector:
             skipped_no_sector += 1
@@ -686,7 +723,7 @@ def fetch_ioz_constituents(top_n: int = 200) -> list:
 
         stocks.append({
             'ticker':        ticker,
-            'company_name':  name,
+            'company_name':  pcf_name,
             'gics_sector':   gics_sector,
             'gics_industry': industry_group,
             'market_value':  market_value,
@@ -696,7 +733,7 @@ def fetch_ioz_constituents(top_n: int = 200) -> list:
     result = stocks[:top_n]
 
     print(f'  IOZ: {len(result)} stocks selected (top {top_n} by market value, '
-          f'{skipped_no_sector} skipped — no GICS sector match)')
+          f'{skipped_no_ticker} no-ticker, {skipped_no_sector} no-sector)')
     return result
 
 
