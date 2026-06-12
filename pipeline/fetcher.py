@@ -455,6 +455,36 @@ class FmpFetcher:
 # ── Wikipedia constituent scraper ─────────────────────────────────────────────
 
 
+def _enrich_with_yf_sectors(stocks: list, *, max_workers: int = 4) -> list:
+    """
+    Fetch GICS sector from YH Finance asset-profile for each stock.
+    Falls back to _djia_sector_lookup for any ticker where Yahoo returns empty.
+    """
+    session = requests.Session()
+
+    def _fetch_one(stock: dict) -> dict:
+        ticker = stock['ticker']
+        try:
+            encoded = urllib.parse.quote(ticker)
+            url = (f'{_RAPID_BASE}/api/v1/markets/stock/modules'
+                   f'?ticker={encoded}&module=asset-profile')
+            resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY)
+                resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 200:
+                body = resp.json().get('body') or {}
+                yf_sector = body.get('sector', '')
+                gics_sector = _YF_TO_GICS_SECTOR.get(yf_sector, '')
+                if gics_sector:
+                    return {**stock, 'gics_sector': gics_sector}
+        except Exception as e:
+            print(f'  DJIA sector [{ticker}]: {e}')
+        return {**stock, 'gics_sector': _djia_sector_lookup(ticker)}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_fetch_one, stocks))
+
 
 # ── SPSM constituent fetcher (SSGA S&P 600 small-cap; Russell 2000 proxy) ────
 # iShares IWM is reliably blocked by Akamai on GitHub Actions; SSGA SPSM XLSX
@@ -903,10 +933,12 @@ class WikipediaScraper:
                         results.append({
                             'ticker':        ticker,
                             'company_name':  name,
-                            'gics_sector':   _djia_sector_lookup(ticker),
+                            'gics_sector':   '',
                             'gics_industry': industry,
                         })
                 if results:
+                    print(f'  Wikipedia DJIA: {len(results)} constituents — enriching sectors via Yahoo Finance...')
+                    results = _enrich_with_yf_sectors(results)
                     print(f'  Wikipedia DJIA: {len(results)} constituents')
                     return results
         except Exception as e:
