@@ -467,6 +467,84 @@ def fetch_xao(session: Optional[requests.Session] = None) -> Optional[dict]:
 
 # ── Wikipedia constituent scraper ─────────────────────────────────────────────
 
+
+
+# ── IWM constituent fetcher ───────────────────────────────────────────────────
+
+_IWM_PRODUCT_URL = 'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf'
+_IWM_CSV_URL     = (
+    'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf'
+    '?fileType=csv&fileName=IWM_holdings&dataType=fund'
+)
+_IWM_HEADERS = {
+    'User-Agent':      ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) '
+                        'Chrome/125.0.0.0 Safari/537.36'),
+    'Accept':          ('text/html,application/xhtml+xml,application/xml;q=0.9,'
+                        'image/avif,image/webp,*/*;q=0.8'),
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer':         'https://www.ishares.com/us/products/239710/ishares-russell-2000-etf',
+    'DNT':             '1',
+    'Connection':      'keep-alive',
+}
+
+
+def fetch_iwm_constituents(top_n: int = 150) -> list:
+    """
+    Downloads the IWM holdings CSV from BlackRock iShares.
+    Pre-fetches the product page to acquire session cookies, uses browser headers
+    to avoid 403. Filters to equity rows only and returns the top_n by market value.
+    Returns list of dicts: {ticker, company_name, gics_sector, market_value}
+    Raises on any fetch or parse failure (no fallback by design).
+    """
+    import csv as _csv
+
+    session = requests.Session()
+
+    # Visit the product page first to acquire session cookies
+    pre = session.get(_IWM_PRODUCT_URL, headers=_IWM_HEADERS, timeout=30)
+    pre.raise_for_status()
+    time.sleep(1.5)
+
+    # Download the holdings CSV
+    r = session.get(_IWM_CSV_URL, headers=_IWM_HEADERS, timeout=60)
+    r.raise_for_status()
+
+    # Locate the data header row — iShares prepends fund metadata rows before it
+    lines = r.text.splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines) if line.startswith('Ticker')),
+        None,
+    )
+    if header_idx is None:
+        raise ValueError('IWM CSV: could not locate Ticker header row')
+
+    # Parse from the header row onward; DictReader handles quoted commas in numbers
+    reader = _csv.DictReader(lines[header_idx:])
+    holdings = []
+    for row in reader:
+        if row.get('Asset Class', '').strip() != 'Equity':
+            continue
+        ticker = row.get('Ticker', '').strip()
+        if not ticker or ticker == '-':
+            continue
+        try:
+            market_value = float(row.get('Market Value', '0').replace(',', ''))
+        except (ValueError, AttributeError):
+            continue
+        holdings.append({
+            'ticker':       ticker,
+            'company_name': row.get('Name', '').strip(),
+            'gics_sector':  row.get('Sector', '').strip(),
+            'market_value': market_value,
+        })
+
+    holdings.sort(key=lambda x: x['market_value'], reverse=True)
+    result = holdings[:top_n]
+    print(f'  IWM: {len(result)} of {len(holdings)} equity holdings selected (top {top_n} by market value)')
+    return result
+
 class WikipediaScraper:
     """
     Scrapes S&P 500, DJIA, and NASDAQ-100 constituents from Wikipedia monthly.
