@@ -123,7 +123,7 @@ def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
 def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                       sector_id: str, sector_name: str,
                       sector_constituents: list[dict],
-                      index_id: str) -> dict:
+                      index_id: str, top_n: int = 20) -> dict:
     print(f'    Screening {sector_id}: {len(sector_constituents)} candidates')
     scored = []
 
@@ -146,7 +146,7 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
         time.sleep(INTER_STOCK_DELAY)
 
     scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
-    top20 = scored[:20]
+    top20 = scored[:top_n]
 
     enriched = []
     for stock in top20:
@@ -195,7 +195,7 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
         time.sleep(INTER_STOCK_DELAY)
 
     scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
-    top20 = scored[:20]
+    top20 = scored[:top_n]
     stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top20, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
@@ -291,7 +291,7 @@ def main():
 
     # ── Russell 2000 dynamic constituents ───────────────────────────────────────────────────────────────
     print('\nFetching Russell 2000 constituents from iShares IWM...')
-    r2k_constituents = fetch_iwm_constituents(top_n=150)
+    r2k_constituents = fetch_iwm_constituents(top_per_sector=10)
     r2k_by_sector    = _group_by_sector(r2k_constituents, 'russell2000')
 
     # ── Index quotes ──────────────────────────────────────────────────────────────────────────────────
@@ -358,7 +358,7 @@ def main():
                 constituents = r2k_by_sector.get(sector_id, {}).get('stocks', [])
                 if not constituents:
                     continue
-                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000')
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000', top_n=10)
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 
