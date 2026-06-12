@@ -574,16 +574,14 @@ _GICS_INDUSTRY_GROUP_TO_SECTOR: dict = {
     'Automobiles & Components':                         'Consumer Discretionary',
     'Consumer Durables & Apparel':                      'Consumer Discretionary',
     'Consumer Services':                                'Consumer Discretionary',
-    'Retailing':                                        'Consumer Discretionary',
     'Consumer Discretionary Distribution & Retail':     'Consumer Discretionary',
-    'Food & Staples Retailing':                         'Consumer Staples',
     'Consumer Staples Distribution & Retail':           'Consumer Staples',
     'Food, Beverage & Tobacco':                         'Consumer Staples',
     'Household & Personal Products':                    'Consumer Staples',
     'Health Care Equipment & Services':                 'Health Care',
     'Pharmaceuticals, Biotechnology & Life Sciences':   'Health Care',
     'Banks':                                            'Financials',
-    'Diversified Financials':                           'Financials',
+    'Financial Services':                               'Financials',
     'Insurance':                                        'Financials',
     'Software & Services':                              'Information Technology',
     'Technology Hardware & Equipment':                  'Information Technology',
@@ -593,7 +591,6 @@ _GICS_INDUSTRY_GROUP_TO_SECTOR: dict = {
     'Utilities':                                        'Utilities',
     'Equity Real Estate Investment Trusts (REITs)':     'Real Estate',
     'Real Estate Management & Development':             'Real Estate',
-    'Real Estate':                                      'Real Estate',
 }
 
 
