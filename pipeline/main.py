@@ -212,6 +212,7 @@ def _format_stock(s: dict, rank: int) -> dict:
         'pe_ratio':             s['pe_ratio'],
         'pb_ratio':             s['pb_ratio'],
         'dividend_yield':       s['dividend_yield'],
+        'dividend_rate':        s.get('dividend_rate'),
         'free_cash_flow':       s['free_cash_flow'],
         'debt_equity':          s['debt_equity'],
         'revenue':              s['revenue'],
