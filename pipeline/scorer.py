@@ -581,9 +581,11 @@ def enrich_from_edgar(stock: dict, edgar_data: Optional[dict]) -> dict:
         net_net_ratio=net_net_ratio,
         revenue_growth=stock.get('revenue_growth'),
         ps_ratio=stock.get('ps_ratio'),
+        industry=stock.get('industry', ''),
     )
+    new_blended = round(0.6 * new_score + 0.4 * stock.get('quality_score', 0.0), 1)
 
-    return {**stock, 'score': new_score,
+    return {**stock, 'score': new_score, 'blended_score': new_blended,
             'interest_coverage': interest_coverage,
             'book_value_growth': book_value_growth,
             'net_net_ratio': net_net_ratio}
@@ -671,10 +673,13 @@ def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) ->
         net_net_ratio=net_net_ratio,
         revenue_growth=stock.get('revenue_growth'),
         ps_ratio=stock.get('ps_ratio'),
+        industry=stock.get('industry', ''),
     )
+    new_blended = round(0.6 * new_score + 0.4 * stock.get('quality_score', 0.0), 1)
 
     return {**stock, 'pe_ratio': pe, 'pb_ratio': pb, 'dividend_yield': div_yield,
             'debt_equity': de, 'roic': roic, 'free_cash_flow': fcf, 'score': new_score,
+            'blended_score': new_blended,
             'interest_coverage': interest_coverage,
             'book_value_growth': book_value_growth,
             'net_net_ratio': net_net_ratio}
