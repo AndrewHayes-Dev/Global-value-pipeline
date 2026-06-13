@@ -114,6 +114,7 @@ class YHFinanceFetcher:
             'income-statement-v2',
             'cashflow-statement-v2',
             'balance-sheet-v2',
+            'summary-detail',
         ]
 
         raw: dict = {}
@@ -134,6 +135,7 @@ class YHFinanceFetcher:
         income_v2  = raw.get('income-statement-v2') or {}
         cf_v2      = raw.get('cashflow-statement-v2') or {}
         bs_v2      = raw.get('balance-sheet-v2') or {}
+        sd         = raw.get('summary-detail') or {}
 
         if not fin and not stats:
             return None
@@ -220,8 +222,9 @@ class YHFinanceFetcher:
         }
         summary_detail = {
             'trailingPE':                  stats.get('trailingPE'),
-            'dividendYield':               stats.get('dividendYield'),
-            'trailingAnnualDividendYield': stats.get('dividendYield'),
+            'dividendYield':               sd.get('dividendYield') or stats.get('dividendYield'),
+            'trailingAnnualDividendYield': sd.get('trailingAnnualDividendYield') or stats.get('dividendYield'),
+            'dividendRate':                sd.get('dividendRate'),
             'priceToBook':                 stats.get('priceToBook'),
         }
 

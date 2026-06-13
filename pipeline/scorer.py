@@ -262,6 +262,9 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if div_raw is not None:
         div_yield = div_raw / 100.0 if div_raw > 1.0 else div_raw
 
+    div_rate_raw = _extract(detail, ['dividendRate'])
+    dividend_rate = div_rate_raw if div_rate_raw and div_rate_raw > 0 else None
+
     revenue    = _extract(income, ['totalRevenue'])    or _extract(fin, ['totalRevenue'])
     net_income = (_extract(income, ['netIncome']) or
                   _extract(income, ['netIncomeApplicableToCommonShares']))
@@ -484,6 +487,7 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         'pe_ratio':              pe,
         'pb_ratio':              pb,
         'dividend_yield':        div_yield,
+        'dividend_rate':         dividend_rate,
         'free_cash_flow':        free_cash_flow,
         'debt_equity':           debt_equity,
         'revenue':               revenue,
@@ -677,7 +681,7 @@ def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) ->
     )
     new_blended = round(0.6 * new_score + 0.4 * stock.get('quality_score', 0.0), 1)
 
-    return {**stock, 'pe_ratio': pe, 'pb_ratio': pb, 'dividend_yield': div_yield,
+    return {**stock, 'pe_ratio': pe, 'pb_ratio': pb, 'dividend_yield': div_yield, 'dividend_rate': stock.get('dividend_rate'),
             'debt_equity': de, 'roic': roic, 'free_cash_flow': fcf, 'score': new_score,
             'blended_score': new_blended,
             'interest_coverage': interest_coverage,
