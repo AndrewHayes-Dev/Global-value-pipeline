@@ -22,6 +22,7 @@ _RAPID_HEADERS = {
 
 _TIMEOUT     = 30
 _RETRY_DELAY = 2
+_RETRY_DELAY_2 = 5  # second retry backoff
 
 
 # ── YH Finance (yahoo-finance15) ──────────────────────────────────────────────
@@ -40,6 +41,10 @@ class YHFinanceFetcher:
             if r.status_code == 429:
                 print(f'  YHFinance rate limit [{ticker}/{module}] — waiting {_RETRY_DELAY}s')
                 time.sleep(_RETRY_DELAY)
+                r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
+            if r.status_code == 429:
+                print(f'  YHFinance rate limit [{ticker}/{module}] — waiting {_RETRY_DELAY_2}s')
+                time.sleep(_RETRY_DELAY_2)
                 r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
             if r.status_code != 200:
                 return None
@@ -112,7 +117,7 @@ class YHFinanceFetcher:
         ]
 
         raw: dict = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             futures = {ex.submit(self._fetch_module, symbol, m): m for m in all_modules}
             for future in concurrent.futures.as_completed(futures):
                 mod = futures[future]
@@ -455,7 +460,7 @@ class FmpFetcher:
 # ── Wikipedia constituent scraper ─────────────────────────────────────────────
 
 
-def _enrich_with_yf_sectors(stocks: list, *, max_workers: int = 4) -> list:
+def _enrich_with_yf_sectors(stocks: list, *, max_workers: int = 2) -> list:
     """
     Fetch GICS sector from YH Finance asset-profile for each stock.
     Falls back to _djia_sector_lookup for any ticker where Yahoo returns empty.
@@ -471,6 +476,9 @@ def _enrich_with_yf_sectors(stocks: list, *, max_workers: int = 4) -> list:
             resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
             if resp.status_code == 429:
                 time.sleep(_RETRY_DELAY)
+                resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY_2)
                 resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
             if resp.status_code == 200:
                 body = resp.json().get('body') or {}
@@ -630,6 +638,9 @@ def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
             if resp.status_code == 429:
                 time.sleep(_RETRY_DELAY)
                 resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY_2)
+                resp = session.get(url, headers=_RAPID_HEADERS, timeout=20)
             if resp.status_code == 200:
                 body = resp.json().get('body') or {}
                 yf_sector   = body.get('sector', '')
@@ -643,7 +654,7 @@ def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
             print(f'  SPSM sector [{ticker}]: {e}')
         return {**stock, 'gics_sector': '', 'gics_industry': ''}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         enriched = list(ex.map(_enrich, universe))
 
     # ── Step 3: Group by GICS sector; top N per sector by weight ─────────────
