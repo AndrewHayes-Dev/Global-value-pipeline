@@ -5,6 +5,9 @@ on:
     - cron: '0 7 1 * *'   # 1st of every month at 7am UTC
   workflow_dispatch:        # allows manual run from GitHub Actions UI
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   pipeline:
     runs-on: ubuntu-latest
