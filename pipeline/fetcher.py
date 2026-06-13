@@ -114,7 +114,6 @@ class YHFinanceFetcher:
             'income-statement-v2',
             'cashflow-statement-v2',
             'balance-sheet-v2',
-            'summary-detail',
         ]
 
         raw: dict = {}
@@ -135,7 +134,29 @@ class YHFinanceFetcher:
         income_v2  = raw.get('income-statement-v2') or {}
         cf_v2      = raw.get('cashflow-statement-v2') or {}
         bs_v2      = raw.get('balance-sheet-v2') or {}
-        sd         = raw.get('summary-detail') or {}
+
+        # Fetch quote for dividend fields (trailingAnnualDividendYield, dividendRate)
+        quote_data: dict = {}
+        try:
+            encoded = urllib.parse.quote(symbol)
+            qr = self.session.get(
+                f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
+                headers=_RAPID_HEADERS, timeout=_TIMEOUT,
+            )
+            if qr.status_code == 429:
+                time.sleep(_RETRY_DELAY)
+                qr = self.session.get(
+                    f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
+                    headers=_RAPID_HEADERS, timeout=_TIMEOUT,
+                )
+            if qr.status_code == 200:
+                qbody = qr.json().get('body')
+                if isinstance(qbody, list) and qbody:
+                    quote_data = qbody[0]
+                elif isinstance(qbody, dict):
+                    quote_data = qbody
+        except Exception as e:
+            print(f'  YHFinance quote [{symbol}]: {e}')
 
         if not fin and not stats:
             return None
@@ -222,9 +243,9 @@ class YHFinanceFetcher:
         }
         summary_detail = {
             'trailingPE':                  stats.get('trailingPE'),
-            'dividendYield':               sd.get('dividendYield') or stats.get('dividendYield'),
-            'trailingAnnualDividendYield': sd.get('trailingAnnualDividendYield') or stats.get('dividendYield'),
-            'dividendRate':                sd.get('dividendRate'),
+            'dividendYield':               quote_data.get('trailingAnnualDividendYield'),
+            'trailingAnnualDividendYield': quote_data.get('trailingAnnualDividendYield'),
+            'dividendRate':                quote_data.get('dividendRate'),
             'priceToBook':                 stats.get('priceToBook'),
         }
 
