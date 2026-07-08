@@ -62,7 +62,10 @@ export default {
       headers.set('Cache-Control', 'public, max-age=86400');
     } else {
       headers.set('Content-Type', 'application/json; charset=utf-8');
-      headers.set('Cache-Control', 'public, max-age=86400');
+      // JSON is re-fetched live from R2 on every request anyway (no KV/edge
+      // cache in this Worker), so don't let downstream CDN caches serve a
+      // stale copy for up to 24h — that masked the July 7 pipeline update.
+      headers.set('Cache-Control', 'no-store');
     }
 
     return new Response(object.body, { headers });

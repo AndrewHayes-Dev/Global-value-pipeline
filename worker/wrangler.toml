@@ -1,6 +1,7 @@
 name = "global-investor-data"
 main = "index.js"
 compatibility_date = "2024-09-23"
+account_id = "a4f0b4d20ef001323d24dd844d90abde"
 
 [[r2_buckets]]
 binding     = "GLOBAL_R2_BUCKET"
