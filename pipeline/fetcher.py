@@ -11,7 +11,7 @@ from typing import Optional
 
 import requests
 
-_RAPID_KEY  = 'fdb3e64a86msh9c5f4c5e59cf7a6p1dd3dcjsn1f9e68aa290b'
+_RAPID_KEY  = '24b6bc2e2bmsh347c3730e17abfcp17ef9cjsnf420d70ec43d'
 _RAPID_HOST = 'yahoo-finance15.p.rapidapi.com'
 _RAPID_BASE = 'https://yahoo-finance15.p.rapidapi.com'
 _RAPID_HEADERS = {
@@ -23,6 +23,13 @@ _RAPID_HEADERS = {
 _TIMEOUT     = 30
 _RETRY_DELAY = 2
 _RETRY_DELAY_2 = 5  # second retry backoff
+
+# ── Cheap pre-filter thresholds (screened from a single quote-endpoint call,
+#    before the 7-module fetch) — loose defaults meant to exclude broken/junk
+#    data, not to pick "good" stocks; final scoring still ranks survivors. ──
+_PREFILTER_MIN_MARKET_CAP = 50_000_000    # $50M floor
+_PREFILTER_MIN_AVG_VOLUME = 50_000        # shares/day floor
+_PREFILTER_MAX_PE         = 150           # excludes distressed/bubble P/E
 
 
 # ── YH Finance (yahoo-finance15) ──────────────────────────────────────────────
@@ -100,12 +107,79 @@ class YHFinanceFetcher:
             result.append(row)
         return result
 
+    def _fetch_quote(self, symbol: str) -> Optional[dict]:
+        """Fetch the quote endpoint: price, marketCap, trailingPE, volume, dividend fields."""
+        try:
+            encoded = urllib.parse.quote(symbol)
+            qr = self.session.get(
+                f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
+                headers=_RAPID_HEADERS, timeout=_TIMEOUT,
+            )
+            if qr.status_code == 429:
+                time.sleep(_RETRY_DELAY)
+                qr = self.session.get(
+                    f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
+                    headers=_RAPID_HEADERS, timeout=_TIMEOUT,
+                )
+            if qr.status_code == 429:
+                time.sleep(_RETRY_DELAY_2)
+                qr = self.session.get(
+                    f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
+                    headers=_RAPID_HEADERS, timeout=_TIMEOUT,
+                )
+            if qr.status_code == 200:
+                qbody = qr.json().get('body')
+                if isinstance(qbody, list) and qbody:
+                    return qbody[0]
+                elif isinstance(qbody, dict):
+                    return qbody
+        except Exception as e:
+            print(f'  YHFinance quote [{symbol}]: {e}')
+        return None
+
+    @staticmethod
+    def _passes_prefilter(q: dict) -> bool:
+        """
+        Cheap screen on quote-endpoint fields, before the 7-module fetch.
+        Loose defaults meant to exclude broken/junk data (unprofitable, illiquid,
+        distressed P/E) — not a quality bar. Final scoring ranks survivors.
+        """
+        eps = q.get('epsTrailingTwelveMonths')
+        if eps is None or eps <= 0:
+            return False
+
+        market_cap = q.get('marketCap')
+        if market_cap is None or market_cap < _PREFILTER_MIN_MARKET_CAP:
+            return False
+
+        volume = q.get('averageDailyVolume3Month') or q.get('regularMarketVolume')
+        if volume is None or volume < _PREFILTER_MIN_AVG_VOLUME:
+            return False
+
+        pe = q.get('trailingPE') or q.get('forwardPE')
+        if pe is None:
+            price = q.get('regularMarketPrice')
+            if price and eps:
+                pe = price / eps
+        if pe is not None and (pe <= 0 or pe > _PREFILTER_MAX_PE):
+            return False
+
+        return True
+
     def quote_summary(self, symbol: str) -> Optional[dict]:
         """
         Fetch and adapt YH Finance data to Yahoo quoteSummary format for scorer.py.
-        Fetches standard + v2 modules concurrently; adapts v2 to Yahoo list format.
-        Returns None if financial-data and default-key-statistics are both empty.
+        Cheap pre-filter first: a single quote-endpoint call screens out weak
+        candidates (unprofitable, illiquid, distressed P/E, sub-$50M market cap)
+        before spending the 7 module calls. Fetches standard + v2 modules
+        concurrently for survivors; adapts v2 to Yahoo list format.
+        Returns None if the pre-filter rejects, or if financial-data and
+        default-key-statistics are both empty after the full fetch.
         """
+        quote_data = self._fetch_quote(symbol)
+        if not quote_data or not self._passes_prefilter(quote_data):
+            return None
+
         all_modules = [
             'financial-data',
             'default-key-statistics',
@@ -134,29 +208,6 @@ class YHFinanceFetcher:
         income_v2  = raw.get('income-statement-v2') or {}
         cf_v2      = raw.get('cashflow-statement-v2') or {}
         bs_v2      = raw.get('balance-sheet-v2') or {}
-
-        # Fetch quote for dividend fields (trailingAnnualDividendYield, dividendRate)
-        quote_data: dict = {}
-        try:
-            encoded = urllib.parse.quote(symbol)
-            qr = self.session.get(
-                f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
-                headers=_RAPID_HEADERS, timeout=_TIMEOUT,
-            )
-            if qr.status_code == 429:
-                time.sleep(_RETRY_DELAY)
-                qr = self.session.get(
-                    f'{_RAPID_BASE}/api/yahoo/qu/quote/{encoded}',
-                    headers=_RAPID_HEADERS, timeout=_TIMEOUT,
-                )
-            if qr.status_code == 200:
-                qbody = qr.json().get('body')
-                if isinstance(qbody, list) and qbody:
-                    quote_data = qbody[0]
-                elif isinstance(qbody, dict):
-                    quote_data = qbody
-        except Exception as e:
-            print(f'  YHFinance quote [{symbol}]: {e}')
 
         if not fin and not stats:
             return None
@@ -232,21 +283,21 @@ class YHFinanceFetcher:
                 elif isinstance(fallback, dict):
                     cf_rows = fallback.get('cashflowStatements') or []
 
-        # ── price / summaryDetail from fin + stats ────────────────────────────
+        # ── price / summaryDetail from quote (authoritative) + fin/stats fallback ──
         long_name = profile.get('longName') or ''
         price_dict = {
             'shortName':  long_name,
             'longName':   long_name,
             'symbol':     symbol,
-            'marketCap':  stats.get('marketCap'),
+            'marketCap':  quote_data.get('marketCap') or stats.get('marketCap'),
             'currency':   fin.get('financialCurrency') or '',
         }
         summary_detail = {
-            'trailingPE':                  stats.get('trailingPE'),
+            'trailingPE':                  quote_data.get('trailingPE') or stats.get('trailingPE'),
             'dividendYield':               quote_data.get('trailingAnnualDividendYield'),
             'trailingAnnualDividendYield': quote_data.get('trailingAnnualDividendYield'),
             'dividendRate':                quote_data.get('dividendRate'),
-            'priceToBook':                 stats.get('priceToBook'),
+            'priceToBook':                 quote_data.get('priceToBook') or stats.get('priceToBook'),
         }
 
         return {
@@ -279,39 +330,6 @@ class YHFinanceFetcher:
             return q
         except Exception as e:
             print(f'  YHFinance chart [{symbol}]: {e}')
-        return None
-
-    def price_trend_check(self, symbol: str) -> Optional[tuple]:
-        """Return (price_2yr_ago, current_price) from a 2yr monthly history call."""
-        try:
-            encoded = urllib.parse.quote(symbol)
-            url = (f'{_RAPID_BASE}/api/v2/markets/stock/history'
-                   f'?symbol={encoded}&interval=1mo')
-            r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
-            if r.status_code == 429:
-                time.sleep(_RETRY_DELAY)
-                r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            body = data.get('body')
-            if not isinstance(body, list) or len(body) < 2:
-                return None
-            # body is sorted oldest-first; take last 24 months
-            slice_24 = body[-24:] if len(body) >= 24 else body
-            old_close = next(
-                (float(e['close']) for e in slice_24 if e.get('close') is not None),
-                None,
-            )
-            current_close = next(
-                (float(e['close']) for e in reversed(slice_24) if e.get('close') is not None),
-                None,
-            )
-            if old_close is None or current_close is None:
-                return None
-            return (old_close, current_close)
-        except Exception as e:
-            print(f'  YHFinance price trend [{symbol}]: {e}')
         return None
 
 

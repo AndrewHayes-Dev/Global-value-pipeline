@@ -1,8 +1,8 @@
-name: Global Monthly Data Pipeline
+name: Global Weekly Data Pipeline
 
 on:
   schedule:
-    - cron: '0 7 1 * *'   # 1st of every month at 7am UTC
+    - cron: '0 7 * * 0'   # every Sunday at 7am UTC
   workflow_dispatch:        # allows manual run from GitHub Actions UI
 
 env:

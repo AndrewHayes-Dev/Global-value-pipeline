@@ -86,17 +86,6 @@ def process_index_quote(yahoo: YHFinanceFetcher, fmp: FmpFetcher, index_def: dic
     return {'index_id': index_def['id'], 'name': index_def['name'], 'updated_at': now}
 
 
-# ── Price trend filter ────────────────────────────────────────────────────────────────────────────
-
-def _has_upward_price_trend(yahoo: YHFinanceFetcher, symbol: str) -> bool:
-    """Return True if current price > price ~2 years ago."""
-    prices = yahoo.price_trend_check(symbol)
-    if prices is None:
-        return True  # if data unavailable, don't exclude
-    old_price, current_price = prices
-    return current_price > old_price
-
-
 # ── Group constituents by GICS sector ────────────────────────────────────────────────────────────────────
 
 def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
@@ -123,7 +112,7 @@ def _group_by_sector(constituents: list[dict], index_prefix: str) -> dict:
 def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetcher,
                       sector_id: str, sector_name: str,
                       sector_constituents: list[dict],
-                      index_id: str, top_n: int = 20) -> dict:
+                      index_id: str, top_n: int = 3) -> dict:
     print(f'    Screening {sector_id}: {len(sector_constituents)} candidates')
     scored = []
 
@@ -131,12 +120,7 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
         ticker   = entry['ticker']
         industry = entry.get('industry', '')
         try:
-            # 2yr price trend filter
             yahoo_symbol = ticker
-            if not _has_upward_price_trend(yahoo, yahoo_symbol):
-                continue
-            time.sleep(0.3)
-
             summary = yahoo.quote_summary(yahoo_symbol)
             stock = score_from_summary(ticker, summary, sector_id, index_id, industry) if summary else None
             if stock:
@@ -146,10 +130,10 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
         time.sleep(INTER_STOCK_DELAY)
 
     scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
-    top20 = scored[:top_n]
+    top_survivors = scored[:top_n]
 
     enriched = []
-    for stock in top20:
+    for stock in top_survivors:
         # FMP enrichment for well-known large-caps
         if stock['ticker'] in FMP_RATIOS_ALLOWED and FMP_KEY:
             ratios_list = fmp.ratios(stock['ticker'], limit=2)
@@ -176,7 +160,7 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
 
 def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str,
                         tickers: list[str], sector_industries: dict,
-                        top_n: int = 20) -> dict:
+                        top_n: int = 3) -> dict:
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
     scored = []
 
@@ -184,9 +168,6 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
         symbol = ticker if '.' in ticker else f'{ticker}.AX'
         industry = sector_industries.get(ticker, '')
         try:
-            if not _has_upward_price_trend(yahoo, symbol):
-                continue
-            time.sleep(0.3)
             summary = yahoo.quote_summary(symbol)
             stock = score_from_summary(ticker, summary, sector_id, 'xao', industry) if summary else None
             if stock:
@@ -196,8 +177,8 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
         time.sleep(INTER_STOCK_DELAY)
 
     scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
-    top20 = scored[:top_n]
-    stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top20, 1)]
+    top_survivors = scored[:top_n]
+    stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top_survivors, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
 
@@ -352,7 +333,7 @@ def main():
                 constituents = r2k_by_sector.get(sector_id, {}).get('stocks', [])
                 if not constituents:
                     continue
-                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000', top_n=10)
+                sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000', top_n=3)
                 sectors_out.append(sd)
                 total_stocks += len(sd['stocks'])
 

@@ -1,6 +1,6 @@
 # pipeline/sector_stocks.py
 # US sector definitions — S&P 500, DJIA, NASDAQ-100 stocks come from Wikipedia dynamically.
-# Russell 2000 constituents come from iShares IWM CSV (top 150 by market value, monthly).
+# Russell 2000 constituents come from iShares IWM CSV (top 150 by market value, weekly).
 # XAO stocks come from AndrewHayes-Dev/XAO-data companion repo.
 
 # ── Index definitions ─────────────────────────────────────────────────────────

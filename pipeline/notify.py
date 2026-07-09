@@ -34,7 +34,7 @@ def send_data_update_notification(total_stocks: int, indices_count: int) -> None
         credentials.refresh(google.auth.transport.requests.Request())
 
         body = (
-            f'Fresh monthly rankings are ready — '
+            f'Fresh weekly rankings are ready — '
             f'{total_stocks} stocks scored across {indices_count} indices.'
         )
         payload = json.dumps({

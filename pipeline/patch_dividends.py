@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_RAPID_KEY  = 'fdb3e64a86msh9c5f4c5e59cf7a6p1dd3dcjsn1f9e68aa290b'
+_RAPID_KEY  = '24b6bc2e2bmsh347c3730e17abfcp17ef9cjsnf420d70ec43d'
 _RAPID_HOST = 'yahoo-finance15.p.rapidapi.com'
 _RAPID_BASE = 'https://yahoo-finance15.p.rapidapi.com'
 _RAPID_HEADERS = {
