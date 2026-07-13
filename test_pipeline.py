@@ -215,9 +215,9 @@ print(f'  score_from_summary smoke: score={s["score"]}, blended={s["blended_scor
 expected_blended = round(0.6 * s['score'] + 0.4 * s['quality_score'], 1)
 check('blended_score = 0.6*score + 0.4*q_score', s['blended_score'], expected_blended)
 
-# intrinsic value: Graham formula sqrt(22.5 * eps * bvps)
-expected_iv = math.sqrt(22.5 * 3.0 * 20.0)
-check('intrinsic_value Graham formula', s['intrinsic_value'], expected_iv, tol=0.01)
+# intrinsic value: Graham's growth-adjusted formula EPS * (8.5 + 2g), g clamped to [0, 15]
+expected_iv = 3.0 * (8.5 + 2 * 12.0)
+check('intrinsic_value Graham growth formula', s['intrinsic_value'], expected_iv, tol=0.01)
 
 # margin of safety: (IV - price) / IV * 100
 expected_mos = (expected_iv - 50.0) / expected_iv * 100

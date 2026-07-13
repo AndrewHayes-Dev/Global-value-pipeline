@@ -394,8 +394,7 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         if r0 is not None and r1 is not None and r1 != 0:
             revenue_growth = (r0 - r1) / abs(r1)
 
-    eps  = _extract(key_stats, ['trailingEps'])
-    bvps = _extract(key_stats, ['bookValue'])
+    eps = _extract(key_stats, ['trailingEps'])
 
     de_raw = _extract(fin, ['debtToEquity'])
     debt_equity = None
@@ -404,14 +403,20 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     elif total_debt is not None and equity is not None and equity > 0:
         debt_equity = total_debt / equity
 
+    # Graham's growth-adjusted intrinsic value: V = EPS x (8.5 + 2g), g in
+    # percentage points, clamped to [0, 15] — Graham's own guidance was to
+    # keep growth assumptions conservative. The unadjusted Graham Number
+    # (sqrt(22.5 x EPS x BVPS)) has no growth term and is proportional to
+    # book value per share, so it systematically undervalues asset-light,
+    # high-growth companies regardless of earnings quality.
     intrinsic_value = None
-    if eps and eps > 0 and bvps and bvps > 0:
-        gn = 22.5 * eps * bvps
-        if gn > 0:
-            intrinsic_value = math.sqrt(gn)
+    if eps and eps > 0:
+        g_pct = (eps_growth * 100) if eps_growth is not None else 0.0
+        g_pct = max(0.0, min(g_pct, 15.0))
+        intrinsic_value = eps * (8.5 + 2 * g_pct)
 
     margin_of_safety = None
-    if intrinsic_value is not None and price and price > 0:
+    if intrinsic_value is not None and intrinsic_value > 0 and price and price > 0:
         margin_of_safety = ((intrinsic_value - price) / intrinsic_value) * 100
 
     fcf_yield = None
