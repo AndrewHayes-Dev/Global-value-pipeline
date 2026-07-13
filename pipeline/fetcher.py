@@ -4,6 +4,7 @@
 
 import calendar
 import concurrent.futures
+import re
 import time
 import urllib.parse
 from datetime import date as _date
@@ -1000,46 +1001,52 @@ class WikipediaScraper:
         return _DJIA_FALLBACK
 
     def nasdaq100(self) -> list:
-        """Returns NASDAQ-100 constituents."""
-        tables = self._fetch_tables(
-            'https://en.wikipedia.org/wiki/Nasdaq-100'
-        )
-        if not tables:
-            return []
-        _ICB_TO_GICS = {
-            'Technology':         'Information Technology',
-            'Telecommunications': 'Communication Services',
-            'Basic Materials':    'Materials',
-        }
+        """
+        Returns NASDAQ-100 constituents.
+        Wikipedia's Nasdaq-100 article no longer embeds a components table
+        (it now only links out to nasdaq.com) — this uses Nasdaq's own
+        public quote-list API instead, then enriches with GICS sector via
+        Yahoo Finance (same pattern as djia()'s Yahoo sector enrichment).
+        """
         try:
-            for df in tables:
-                sym_col  = next((c for c in df.columns if 'ticker' in str(c).lower() or
-                                 'symbol' in str(c).lower()), None)
-                name_col = next((c for c in df.columns if 'company' in str(c).lower()), None)
-                ind_col  = next((c for c in df.columns if 'industry' in str(c).lower()), None)
-                sec_col  = next((c for c in df.columns if 'sector' in str(c).lower()), None)
-                classify_col = ind_col or sec_col
-                if sym_col is None:
-                    continue
-                results = []
-                for _, row in df.iterrows():
-                    ticker     = str(row.get(sym_col, '')).strip().replace('.', '-')
-                    name       = str(row.get(name_col, ticker)).strip() if name_col else ticker
-                    raw_sector = str(row.get(classify_col, '')).strip() if classify_col else ''
-                    sector     = _ICB_TO_GICS.get(raw_sector, raw_sector)
-                    if ticker and len(ticker) <= 6:
-                        results.append({
-                            'ticker':        ticker,
-                            'company_name':  name,
-                            'gics_sector':   sector,
-                            'gics_industry': '',
-                        })
-                if results:
-                    print(f'  Wikipedia NASDAQ-100: {len(results)} constituents')
-                    return results
+            # api.nasdaq.com's bot protection resets the connection for the
+            # pipeline's self-identifying User-Agent (used everywhere else in
+            # this class) — a browser UA is required here.
+            r = self.session.get(
+                'https://api.nasdaq.com/api/quote/list-type/nasdaq100',
+                headers={
+                    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                    'Chrome/125.0.0.0 Safari/537.36'),
+                    'Accept': 'application/json, text/plain, */*',
+                },
+                timeout=30,
+            )
+            if r.status_code != 200:
+                print(f'  NASDAQ-100 api.nasdaq.com fetch failed: HTTP {r.status_code}')
+                return _NASDAQ100_FALLBACK
+            rows = r.json()['data']['data']['rows']
+            results = []
+            for row in rows:
+                ticker = str(row.get('symbol', '')).strip().replace('.', '-')
+                name = re.sub(r'\s+Common Stock.*$', '', str(row.get('companyName', ticker))).strip()
+                if ticker:
+                    results.append({
+                        'ticker':        ticker,
+                        'company_name':  name or ticker,
+                        'gics_sector':   '',
+                        'gics_industry': '',
+                    })
+            if not results:
+                print('  NASDAQ-100 api.nasdaq.com returned no constituents — using static fallback')
+                return _NASDAQ100_FALLBACK
+            print(f'  api.nasdaq.com NASDAQ-100: {len(results)} constituents — enriching sectors via Yahoo Finance...')
+            results = _enrich_with_yf_sectors(results)
+            print(f'  api.nasdaq.com NASDAQ-100: {len(results)} constituents')
+            return results
         except Exception as e:
-            print(f'  NASDAQ-100 parse error: {e}')
-        return []
+            print(f'  NASDAQ-100 parse error: {e} — using static fallback')
+            return _NASDAQ100_FALLBACK
 
 
 def _djia_sector_lookup(ticker: str) -> str:
@@ -1096,4 +1103,113 @@ _DJIA_FALLBACK = [
     {'ticker': 'V',    'company_name': 'Visa Inc.',                   'gics_sector': 'Financials',             'gics_industry': 'Transaction & Payment Processing Services'},
     {'ticker': 'VZ',   'company_name': 'Verizon Communications Inc.', 'gics_sector': 'Communication Services', 'gics_industry': 'Integrated Telecommunication Services'},
     {'ticker': 'WMT',  'company_name': 'Walmart Inc.',                'gics_sector': 'Consumer Staples',       'gics_industry': 'Consumer Staples Merchandise Retail'},
+]
+
+# Static fallback for nasdaq100() if api.nasdaq.com is ever unreachable
+# (e.g. blocked from GitHub Actions runner IPs). Snapshot taken 2026-07-13 —
+# will drift from actual NASDAQ-100 membership over time; refresh periodically.
+_NASDAQ100_FALLBACK = [
+    {'ticker': 'AAPL', 'company_name': 'Apple Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ABNB', 'company_name': 'Airbnb, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'ADBE', 'company_name': 'Adobe Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ADI', 'company_name': 'Analog Devices, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ADP', 'company_name': 'Automatic Data Processing, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ADSK', 'company_name': 'Autodesk, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'AEP', 'company_name': 'American Electric Power Company, Inc.', 'gics_sector': 'Utilities', 'gics_industry': ''},
+    {'ticker': 'ALAB', 'company_name': 'Astera Labs, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ALNY', 'company_name': 'Alnylam Pharmaceuticals, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'AMAT', 'company_name': 'Applied Materials, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'AMD', 'company_name': 'Advanced Micro Devices, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'AMGN', 'company_name': 'Amgen Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'AMZN', 'company_name': 'Amazon.com, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'APP', 'company_name': 'Applovin Corporation', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'ARM', 'company_name': 'Arm Holdings plc American Depositary Shares', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ASML', 'company_name': 'ASML Holding N.V. New York Registry Shares', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'AVGO', 'company_name': 'Broadcom Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'AXON', 'company_name': 'Axon Enterprise, Inc.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'BKNG', 'company_name': 'Booking Holdings Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'BKR', 'company_name': 'Baker Hughes Company', 'gics_sector': 'Energy', 'gics_industry': ''},
+    {'ticker': 'CCEP', 'company_name': 'Coca-Cola Europacific Partners plc', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'CDNS', 'company_name': 'Cadence Design Systems, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'CEG', 'company_name': 'Constellation Energy Corporation', 'gics_sector': 'Utilities', 'gics_industry': ''},
+    {'ticker': 'CMCSA', 'company_name': 'Comcast Corporation', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'COST', 'company_name': 'Costco Wholesale Corporation', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'CPRT', 'company_name': 'Copart, Inc. (DE)', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'CRWD', 'company_name': 'CrowdStrike Holdings, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'CRWV', 'company_name': 'CoreWeave, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'CSCO', 'company_name': 'Cisco Systems, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'CSX', 'company_name': 'CSX Corporation', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'CTAS', 'company_name': 'Cintas Corporation', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'DASH', 'company_name': 'DoorDash, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'DDOG', 'company_name': 'Datadog, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'DXCM', 'company_name': 'DexCom, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'EA', 'company_name': 'Electronic Arts Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'EXC', 'company_name': 'Exelon Corporation', 'gics_sector': 'Utilities', 'gics_industry': ''},
+    {'ticker': 'FANG', 'company_name': 'Diamondback Energy, Inc.', 'gics_sector': 'Energy', 'gics_industry': ''},
+    {'ticker': 'FAST', 'company_name': 'Fastenal Company', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'FER', 'company_name': 'Ferrovial N.V.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'FTNT', 'company_name': 'Fortinet, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'GEHC', 'company_name': 'GE HealthCare Technologies Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'GILD', 'company_name': 'Gilead Sciences, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'GOOG', 'company_name': 'Alphabet Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'GOOGL', 'company_name': 'Alphabet Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'HON', 'company_name': 'Honeywell International Inc.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'HONA', 'company_name': 'Honeywell Aerospace Inc.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'IDXX', 'company_name': 'IDEXX Laboratories, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'INTC', 'company_name': 'Intel Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'INTU', 'company_name': 'Intuit Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ISRG', 'company_name': 'Intuitive Surgical, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'KDP', 'company_name': 'Keurig Dr Pepper Inc.', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'KHC', 'company_name': 'The Kraft Heinz Company', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'KLAC', 'company_name': 'KLA Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'LIN', 'company_name': 'Linde plc', 'gics_sector': 'Materials', 'gics_industry': ''},
+    {'ticker': 'LITE', 'company_name': 'Lumentum Holdings Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'LRCX', 'company_name': 'Lam Research Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MAR', 'company_name': 'Marriott International', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'MCHP', 'company_name': 'Microchip Technology Incorporated', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MDLZ', 'company_name': 'Mondelez International, Inc.', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'MELI', 'company_name': 'MercadoLibre, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'META', 'company_name': 'Meta Platforms, Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'MNST', 'company_name': 'Monster Beverage Corporation', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'MPWR', 'company_name': 'Monolithic Power Systems, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MRVL', 'company_name': 'Marvell Technology, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MSFT', 'company_name': 'Microsoft Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MSTR', 'company_name': 'Strategy Inc', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'MU', 'company_name': 'Micron Technology, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'NBIS', 'company_name': 'Nebius Group N.V.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'NFLX', 'company_name': 'Netflix, Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'NVDA', 'company_name': 'NVIDIA Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'NXPI', 'company_name': 'NXP Semiconductors N.V.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ODFL', 'company_name': 'Old Dominion Freight Line, Inc.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'ORLY', 'company_name': "O'Reilly Automotive, Inc.", 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'PANW', 'company_name': 'Palo Alto Networks, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'PAYX', 'company_name': 'Paychex, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'PCAR', 'company_name': 'PACCAR Inc.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'PDD', 'company_name': 'PDD Holdings Inc. American Depositary Shares', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'PEP', 'company_name': 'PepsiCo, Inc.', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'PLTR', 'company_name': 'Palantir Technologies Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'PYPL', 'company_name': 'PayPal Holdings, Inc.', 'gics_sector': 'Financials', 'gics_industry': ''},
+    {'ticker': 'QCOM', 'company_name': 'QUALCOMM Incorporated', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'REGN', 'company_name': 'Regeneron Pharmaceuticals, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'RKLB', 'company_name': 'Rocket Lab Corporation', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'ROP', 'company_name': 'Roper Technologies, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'ROST', 'company_name': 'Ross Stores, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'SBUX', 'company_name': 'Starbucks Corporation', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'SHOP', 'company_name': 'Shopify Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'SNDK', 'company_name': 'Sandisk Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'SNPS', 'company_name': 'Synopsys, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'SPCX', 'company_name': 'Space Exploration Technologies Corp.', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'STX', 'company_name': 'Seagate Technology Holdings PLC', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'TER', 'company_name': 'Teradyne, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'TMUS', 'company_name': 'T-Mobile US, Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'TRI', 'company_name': 'Thomson Reuters Corporation Common Shares', 'gics_sector': 'Industrials', 'gics_industry': ''},
+    {'ticker': 'TSLA', 'company_name': 'Tesla, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
+    {'ticker': 'TTWO', 'company_name': 'Take-Two Interactive Software, Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'TXN', 'company_name': 'Texas Instruments Incorporated', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'VRTX', 'company_name': 'Vertex Pharmaceuticals Incorporated', 'gics_sector': 'Health Care', 'gics_industry': ''},
+    {'ticker': 'WBD', 'company_name': 'Warner Bros. Discovery, Inc. Series A', 'gics_sector': 'Communication Services', 'gics_industry': ''},
+    {'ticker': 'WDAY', 'company_name': 'Workday, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'WDC', 'company_name': 'Western Digital Corporation', 'gics_sector': 'Information Technology', 'gics_industry': ''},
+    {'ticker': 'WMT', 'company_name': 'Walmart Inc.', 'gics_sector': 'Consumer Staples', 'gics_industry': ''},
+    {'ticker': 'XEL', 'company_name': 'Xcel Energy Inc.', 'gics_sector': 'Utilities', 'gics_industry': ''},
 ]
