@@ -8,6 +8,7 @@ sys.path.insert(0, 'pipeline')
 from scorer import (
     buffett_score, quality_score, score_from_summary,
     enrich_from_edgar, enrich_from_fmp, _extract,
+    _first_not_none, _is_bank_industry, _normalise_industry,
 )
 from uploader import _sanitize
 from generate_stock_spreadsheets import _fmt
@@ -379,6 +380,132 @@ check('fmt pct_raw',           _fmt(25.5, 'pct_raw'),'25.5%')
 check('fmt str',               _fmt(42, 'str'),      '42')
 check('fmt nan→None',          _fmt(float('nan'), 'f2'), None)
 check('fmt inf→None',          _fmt(float('inf'), 'f2'), None)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Industry normalisation / bank detection
+# Industry arrives as GICS sub-industry (S&P 500) or Yahoo label (all other
+# indices). Both dialects must resolve to the same bank/non-bank answer.
+# ────────────────────────────────────────────────────────────────────────────
+check('normalise dash',        _normalise_industry('Banks - Regional'), 'banks regional')
+check('normalise ampersand',   _normalise_industry('Thrifts & Mortgage Finance'),
+                                                  'thrifts and mortgage finance')
+check('normalise em-dash',     _normalise_industry('Banks—Diversified'), 'banks diversified')
+check('normalise empty',       _normalise_industry(''), '')
+
+check('bank GICS regional',    _is_bank_industry('Regional Banks'),        True)
+check('bank GICS diversified', _is_bank_industry('Diversified Banks'),     True)
+check('bank GICS thrifts',     _is_bank_industry('Thrifts & Mortgage Finance'), True)
+check('bank GICS consumer fin',_is_bank_industry('Consumer Finance'),      True)
+check('bank Yahoo regional',   _is_bank_industry('Banks - Regional'),      True)
+check('bank Yahoo diversified',_is_bank_industry('Banks - Diversified'),   True)
+check('bank GICS thrifts yahoo',_is_bank_industry('Mortgage Finance'),     True)
+# Yahoo's 'Credit Services' conflates lenders with payment networks (V, PYPL),
+# so it must NOT trigger bank treatment — see the note on _BANK_INDUSTRIES.
+check('bank not credit services',_is_bank_industry('Credit Services'),     False)
+check('bank not software',     _is_bank_industry('Software - Application'), False)
+check('bank not insurance',    _is_bank_industry('Property & Casualty Insurance'), False)
+check('bank not biotech',      _is_bank_industry('Biotechnology'),         False)
+check('bank empty industry',   _is_bank_industry(''),                      False)
+
+# The Yahoo dialect must now reach the reduced 142 denominator, exactly as the
+# GICS dialect already did. Same inputs, two spellings, one score.
+_bank_args = dict(
+    pe=12, pb=1.2, margin_of_safety=30, fcf_yield=None, debt_equity=None,
+    owner_earnings=1e9, roic=0.12, div_yield=0.03,
+    roe=0.18, peg_ratio=1.2, interest_coverage=8,
+    gross_margin=None, current_ratio=1.6, eps_growth=0.12,
+    roe_3yr_avg=0.16, earnings_consistency=4,
+    book_value_growth=0.08, net_net_ratio=0.5, revenue_growth=0.09,
+    ps_ratio=2.5,
+)
+gics_bank  = buffett_score(**_bank_args, industry='Regional Banks')
+yahoo_bank = buffett_score(**_bank_args, industry='Banks - Regional')
+non_bank   = buffett_score(**_bank_args, industry='Software - Application')
+check('bank dialects agree',   yahoo_bank, gics_bank)
+check('bank beats non-bank on missing bank-irrelevant fields',
+      yahoo_bank > non_bank, True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# _first_not_none — 0.0 is a value, not a miss
+# ────────────────────────────────────────────────────────────────────────────
+check('first_not_none keeps 0',    _first_not_none(0.0, 5.0),    0.0)
+check('first_not_none skips None', _first_not_none(None, 5.0),   5.0)
+check('first_not_none all None',   _first_not_none(None, None),  None)
+check('first_not_none keeps neg',  _first_not_none(-1.0, 5.0),  -1.0)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Negative debt/equity must not score as a pristine balance sheet
+# ────────────────────────────────────────────────────────────────────────────
+_de_args = dict(
+    pe=None, pb=None, margin_of_safety=None, fcf_yield=None,
+    owner_earnings=None, roic=None, div_yield=None,
+)
+de_zero     = buffett_score(**_de_args, debt_equity=0.0)
+de_negative = buffett_score(**_de_args, debt_equity=-2.0)
+de_none     = buffett_score(**_de_args, debt_equity=None)
+check('debt-free scores best',      de_zero > 0,          True)
+check('negative equity scores 0',   de_negative,          de_none)
+check('negative equity != debt-free', de_negative == de_zero, False)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Share issuance must not be rewarded as if it were a buyback
+# ────────────────────────────────────────────────────────────────────────────
+def _summary_with_repurchase(repurchase):
+    return {
+        'price': {'marketCap': 1e10},
+        'financialData': {'currentPrice': 100.0, 'totalRevenue': 1e9},
+        'defaultKeyStatistics': {'trailingEps': 5.0, 'sharesOutstanding': 1e8},
+        'summaryDetail': {'dividendYield': 0.02},
+        'incomeStatementHistory': {'incomeStatementHistory': [
+            {'totalRevenue': 1e9, 'netIncome': 2e8, 'grossProfit': 6e8},
+        ]},
+        'cashflowStatementHistory': {'cashflowStatements': [
+            {'repurchaseOfStock': repurchase,
+             'totalCashFromOperatingActivities': 3e8,
+             'capitalExpenditures': -5e7},
+        ]},
+        'balanceSheetHistory': {'balanceSheetStatements': [
+            {'totalStockholderEquity': 5e9, 'totalDebt': 1e9},
+        ]},
+    }
+
+buyback  = score_from_summary('BUY', _summary_with_repurchase(-5e8), 's', 'i')
+issuance = score_from_summary('ISS', _summary_with_repurchase(5e8),  's', 'i')
+check('buyback yield positive',  buyback['shareholder_yield'] > 0.02,  True)
+check('issuance yield negative', issuance['shareholder_yield'] < 0.02, True)
+check('issuance quality <= buyback quality',
+      issuance['quality_score'] <= buyback['quality_score'], True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Market cap must not be fabricated from price alone
+# ────────────────────────────────────────────────────────────────────────────
+_no_mc = {
+    'financialData': {'currentPrice': 50.0, 'totalRevenue': 1e9,
+                      'freeCashflow': 1e8},
+    'defaultKeyStatistics': {'trailingEps': 4.0},
+    'incomeStatementHistory': {'incomeStatementHistory': [
+        {'totalRevenue': 1e9, 'netIncome': 1e8},
+    ]},
+}
+no_mc = score_from_summary('NOMC', _no_mc, 's', 'i')
+check('no market cap → no ps_ratio',   no_mc['ps_ratio'],          None)
+check('no market cap → no net_net',    no_mc['net_net_ratio'],     None)
+check('no market cap → no shareholder yield from buybacks',
+      no_mc['shareholder_yield'],                                  None)
+
+# Without a market cap there is no denominator, so free cash flow cannot yield
+# a fcf_yield — the score must be identical to the same company with no FCF
+# reported at all. Under the old `price * 1e9` fallback it was not.
+_no_mc_no_fcf = json.loads(json.dumps(_no_mc))
+del _no_mc_no_fcf['financialData']['freeCashflow']
+no_mc_no_fcf = score_from_summary('NOMC2', _no_mc_no_fcf, 's', 'i')
+check('no market cap → FCF cannot inflate score',
+      no_mc['score'], no_mc_no_fcf['score'])
 
 
 # ────────────────────────────────────────────────────────────────────────────

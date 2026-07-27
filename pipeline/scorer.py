@@ -27,6 +27,17 @@ def _extract(data, keys: list) -> Optional[float]:
         return None
 
 
+def _first_not_none(*values) -> Optional[float]:
+    """
+    Like `a or b`, but 0.0 is a real value rather than a miss. A debt-free
+    company reports totalDebt of 0, which `or` silently discarded.
+    """
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def _extract_string(summary: dict, key: str) -> Optional[str]:
     for module in ('quoteType', 'summaryProfile', 'price', 'assetProfile'):
         mod = summary.get(module)
@@ -40,10 +51,53 @@ def _extract_string(summary: dict, key: str) -> Optional[str]:
     return None
 
 
+# Industry names arrive in two dialects: GICS sub-industries (S&P 500, scraped
+# from Wikipedia) and Yahoo's own industry labels (every other index, via
+# summaryProfile). Matching a fixed set of GICS strings therefore missed every
+# bank outside the S&P 500 — Yahoo calls them 'Banks - Regional' and
+# 'Credit Services', not 'Regional Banks' and 'Consumer Finance'. Normalise
+# before comparing so both dialects resolve to the same answer.
+#
+# Deliberately NOT included: Yahoo's 'Credit Services'. GICS separates lenders
+# ('Consumer Finance', e.g. AXP) from payment networks ('Transaction & Payment
+# Processing Services', e.g. V, MA, PYPL), but Yahoo files both under 'Credit
+# Services'. Payment networks have genuine gross margins and free cash flow, so
+# suppressing those metrics for them would be a worse error than the one being
+# fixed. Consequence: a lender reaching us via the Yahoo dialect is scored as a
+# non-bank. That is a limitation of Yahoo's taxonomy, not something a string
+# match can resolve.
 _BANK_INDUSTRIES = {
-    'Diversified Banks', 'Regional Banks', 'Commercial Banks',
-    'Thrifts & Mortgage Finance', 'Consumer Finance',
+    # GICS dialect
+    'diversified banks', 'regional banks', 'commercial banks',
+    'thrifts and mortgage finance', 'consumer finance',
+    # Yahoo dialect
+    'banks diversified', 'banks regional', 'mortgage finance',
 }
+
+
+def _normalise_industry(industry: str) -> str:
+    """Lowercase, unify dash/ampersand separators, collapse whitespace."""
+    if not industry:
+        return ''
+    s = industry.lower()
+    for ch in ('—', '–', '-', '/', ','):
+        s = s.replace(ch, ' ')
+    s = s.replace('&', ' and ')
+    return ' '.join(s.split())
+
+
+def _is_bank_industry(industry: str) -> bool:
+    """
+    True for deposit-taking and lending businesses, where free cash flow,
+    debt/equity and gross margin are not meaningful measures.
+    """
+    norm = _normalise_industry(industry)
+    if not norm:
+        return False
+    if norm in _BANK_INDUSTRIES:
+        return True
+    # Catches 'banks diversified', 'regional banks', 'commercial banking', etc.
+    return 'bank' in norm.split() or norm.startswith('bank')
 
 
 def quality_score(*, fcf_margin, capex_intensity, gross_margin,
@@ -110,7 +164,7 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
                   book_value_growth=None, net_net_ratio=None,
                   revenue_growth=None, ps_ratio=None, industry: str = '') -> float:
     score = 0.0
-    is_bank = industry in _BANK_INDUSTRIES
+    is_bank = _is_bank_industry(industry)
 
     if pe is not None and pe > 0:
         if pe <= 10:   score += 20
@@ -137,7 +191,10 @@ def buffett_score(*, pe, pb, margin_of_safety, fcf_yield, debt_equity,
             elif fcf_yield > 0:     score += 2
 
     if not is_bank:
-        if debt_equity is not None:
+        # Negative debt/equity means negative shareholder equity — a distressed
+        # balance sheet, not a pristine one. Without the >= 0 guard it scored
+        # the full 10 points for being "below" every threshold.
+        if debt_equity is not None and debt_equity >= 0:
             if debt_equity <= 0.25:  score += 10
             elif debt_equity <= 0.5: score += 7
             elif debt_equity <= 1.0: score += 3
@@ -245,7 +302,10 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     shares_out  = _extract(key_stats, ['sharesOutstanding'])
     market_cap  = (_extract(price_mod, ['marketCap']) or
                    (shares_out * price if shares_out and price and price > 0 else None))
-    mc_for_yield = market_cap or (price * 1e9 if price and price > 0 else None)
+    # Previously fell back to `price * 1e9`, inventing a share count and with it
+    # a market cap that bore no relation to the company. Every ratio built on it
+    # (fcf_yield, buyback_yield) was fiction. Better to leave those None.
+    mc_for_yield = market_cap
 
     pe = _extract(detail, ['trailingPE']) or _extract(key_stats, ['forwardPE'])
     if pe is None:
@@ -271,9 +331,9 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if net_income is not None and net_income < 0:
         return None
 
-    total_debt = (_extract(balance, ['totalDebt']) or
-                  _extract(balance, ['longTermDebt']) or
-                  _extract(fin, ['totalDebt']))
+    total_debt = _first_not_none(_extract(balance, ['totalDebt']),
+                                 _extract(balance, ['longTermDebt']),
+                                 _extract(fin, ['totalDebt']))
     equity = (_extract(balance, ['totalStockholderEquity']) or
               _extract(balance, ['stockholdersEquity']))
     if equity is None:
@@ -295,7 +355,8 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
                       if net_income is not None and da is not None and capex is not None
                       else net_income)
 
-    roic = _extract(fin, ['returnOnCapital']) or _extract(fin, ['returnOnEquity'])
+    roic = _first_not_none(_extract(fin, ['returnOnCapital']),
+                           _extract(fin, ['returnOnEquity']))
     if roic is None and net_income is not None and total_debt is not None and equity is not None:
         ic = total_debt + max(equity, 0)
         if ic > 0:
@@ -436,10 +497,14 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if capex is not None and revenue and revenue > 0:
         capex_intensity = abs(capex) / revenue
 
+    # repurchaseOfStock is a cash-flow line: negative when the company buys its
+    # own shares back, positive when it issues new ones. abs() treated dilution
+    # as if it were a buyback and paid quality points for it. Negate instead, so
+    # issuance produces a negative yield and is correctly penalised.
     repurchase = _extract(cash, ['repurchaseOfStock'])
     buyback_yield = None
     if repurchase is not None and mc_for_yield and mc_for_yield > 0:
-        buyback_yield = abs(repurchase) / mc_for_yield
+        buyback_yield = -repurchase / mc_for_yield
     shareholder_yield = None
     if div_yield is not None or buyback_yield is not None:
         shareholder_yield = (div_yield or 0.0) + (buyback_yield or 0.0)
@@ -628,8 +693,12 @@ def enrich_from_fmp(stock: dict, ratios_list: list, key_metrics: list = None) ->
         if raw is not None:
             div_yield = raw / 100.0 if raw > 1.0 else raw
 
-    de   = stock['debt_equity'] or fmp_double('debtToEquityRatio')
-    roic = stock['roic'] or fmp_double('returnOnCapitalEmployed') or fmp_double('returnOnEquity')
+    # 0.0 is a meaningful value for both (debt-free, or no return on capital),
+    # so `or` would wrongly discard it in favour of the FMP figure.
+    de   = _first_not_none(stock['debt_equity'], fmp_double('debtToEquityRatio'))
+    roic = _first_not_none(stock['roic'],
+                           fmp_double('returnOnCapitalEmployed'),
+                           fmp_double('returnOnEquity'))
 
     fcf = stock['free_cash_flow']
     if fcf is None and stock.get('market_cap') and stock.get('current_price') and stock['current_price'] > 0:
