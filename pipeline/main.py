@@ -200,6 +200,7 @@ def _format_stock(s: dict, rank: int) -> dict:
         'net_income':           s['net_income'],
         'intrinsic_value':      s['intrinsic_value'],
         'margin_of_safety':     s['margin_of_safety'],
+        'growth_basis':         s.get('growth_basis'),
         'current_price':        s['current_price'],
         'owner_earnings':       s.get('owner_earnings'),
         'roic':                 s.get('roic'),

@@ -2,6 +2,7 @@
 # Buffett scoring model — identical logic to the original value-investor-pipeline.
 
 import math
+import os
 from typing import Optional
 
 
@@ -25,6 +26,50 @@ def _extract(data, keys: list) -> Optional[float]:
         return float(str(cur))
     except (TypeError, ValueError):
         return None
+
+
+# Graham's revised formula divides by the prevailing AAA corporate bond yield:
+#   V = EPS x (8.5 + 2g) x 4.4 / Y
+# 4.4 was the AAA yield when Graham wrote, so Y = 4.4 makes the term a no-op and
+# reproduces the unadjusted formula. Set GRAHAM_AAA_YIELD to the live Moody's
+# AAA yield (as a percentage, e.g. 5.4) to activate the correction — at a higher
+# yield the same earnings stream is worth less, so every intrinsic value falls.
+# Left at 4.4 by default: a stale hardcoded rate would silently revalue the
+# entire dataset against a number nobody checked.
+_GRAHAM_BASE_YIELD = 4.4
+try:
+    AAA_BOND_YIELD = float(os.environ.get('GRAHAM_AAA_YIELD', _GRAHAM_BASE_YIELD))
+    if AAA_BOND_YIELD <= 0:
+        AAA_BOND_YIELD = _GRAHAM_BASE_YIELD
+except (TypeError, ValueError):
+    AAA_BOND_YIELD = _GRAHAM_BASE_YIELD
+
+
+def _earnings_cagr(income_list: list) -> Optional[float]:
+    """
+    Compound annual earnings growth across all available annual periods.
+
+    Graham's `g` is the expected average annual growth over the next seven to
+    ten years. The nearest honest proxy from the filings we hold is the
+    realised CAGR across the full history, not the latest year-over-year jump —
+    a single strong year previously set `g` for the whole valuation.
+
+    Returns None when the span is under two years or either endpoint is
+    non-positive, since a CAGR through zero or negative earnings is undefined.
+    """
+    if not income_list or len(income_list) < 3:
+        return None
+    series = []
+    for inc in income_list:
+        ni = _extract(inc, ['netIncome'])
+        if ni is None:
+            return None
+        series.append(ni)
+    newest, oldest = series[0], series[-1]
+    years = len(series) - 1
+    if years < 2 or oldest <= 0 or newest <= 0:
+        return None
+    return (newest / oldest) ** (1.0 / years) - 1.0
 
 
 def _first_not_none(*values) -> Optional[float]:
@@ -148,10 +193,12 @@ def quality_score(*, fcf_margin, capex_intensity, gross_margin,
         elif op_margin >= 0.10: score += 5
         elif op_margin >= 0.05: score += 2
 
+    # Thresholds in percentage points of gross margin: +2pp is real expansion,
+    # -1pp is roughly flat, beyond -5pp is meaningful erosion.
     if gm_trend is not None:
-        if gm_trend >= 0.05:    score += 5
-        elif gm_trend >= -0.02: score += 3
-        elif gm_trend >= -0.10: score += 1
+        if gm_trend >= 0.02:    score += 5
+        elif gm_trend >= -0.01: score += 3
+        elif gm_trend >= -0.05: score += 1
 
     _MAX_QUALITY = 130.0
     return round(min(100.0, max(0.0, score / _MAX_QUALITY * 100.0)), 1)
@@ -328,8 +375,11 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     revenue    = _extract(income, ['totalRevenue'])    or _extract(fin, ['totalRevenue'])
     net_income = (_extract(income, ['netIncome']) or
                   _extract(income, ['netIncomeApplicableToCommonShares']))
-    if net_income is not None and net_income < 0:
-        return None
+    # A loss-making year is a scoring input, not grounds for erasing the company
+    # from the dataset. Every metric below guards its own sign, so a loss simply
+    # forfeits the points it would have earned. (In practice the fetcher's
+    # prefilter still drops eps <= 0 before we get here, so this changes the
+    # scorer's correctness rather than the current dataset.)
 
     total_debt = _first_not_none(_extract(balance, ['totalDebt']),
                                  _extract(balance, ['longTermDebt']),
@@ -351,9 +401,14 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
                       (operating_cf + capex if operating_cf is not None and capex is not None
                        else operating_cf))
 
+    # Owner earnings = net income + depreciation/amortisation - capex (capex is
+    # already negative in the cash-flow statement). Previously fell back to bare
+    # net income when D&A or capex was missing, which — since net income was
+    # guaranteed positive at this point — handed nearly every company the full
+    # 10 points for a figure that had not actually been measured.
     owner_earnings = (net_income + da + capex
                       if net_income is not None and da is not None and capex is not None
-                      else net_income)
+                      else None)
 
     roic = _first_not_none(_extract(fin, ['returnOnCapital']),
                            _extract(fin, ['returnOnEquity']))
@@ -389,8 +444,12 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
             rv = _extract(inc, ['totalRevenue'])
             if gp is not None and rv and rv > 0:
                 gm_series.append(gp / rv)
-        if len(gm_series) >= 2 and gm_series[-1] != 0:
-            gm_trend = (gm_series[0] - gm_series[-1]) / abs(gm_series[-1])
+        # Percentage-point change, not relative change. Gross margin is already
+        # a ratio; dividing its change by its own base made "margin moved from
+        # 50% to 52.5%" and "margin moved from 4% to 4.2%" both read as +0.05,
+        # while the scoring thresholds were written as if they were points.
+        if len(gm_series) >= 2:
+            gm_trend = gm_series[0] - gm_series[-1]
 
     current_assets      = _extract(balance, ['totalCurrentAssets'])
     current_liabilities = _extract(balance, ['totalCurrentLiabilities'])
@@ -425,12 +484,17 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if roe_3yr_avg is None:
         roe_3yr_avg = roe
 
+    # Profitable years, rescaled to the conventional 0-4 range. Previously this
+    # was a raw count, so a company with only two years of filings could never
+    # exceed 2 however flawless its record — a penalty for short history rather
+    # than for inconsistency. Scaling by the years actually available measures
+    # the record instead of the filing depth.
     earnings_consistency = None
     if income_list:
         length = min(len(income_list), 4)
         profitable = sum(1 for i in range(length)
                          if (_extract(income_list[i], ['netIncome']) or 0) > 0)
-        earnings_consistency = profitable
+        earnings_consistency = round(profitable / length * 4)
 
     book_value_growth = None
     if len(bal_list) >= 2:
@@ -470,11 +534,22 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     # (sqrt(22.5 x EPS x BVPS)) has no growth term and is proportional to
     # book value per share, so it systematically undervalues asset-light,
     # high-growth companies regardless of earnings quality.
+    # `g` is the long-run growth rate. Prefer the multi-year CAGR; fall back to
+    # the latest year-over-year change only when there is too little history to
+    # compute one, and assume no growth when even that is missing. Clamped to
+    # [0, 15] per Graham's own guidance to keep growth assumptions conservative.
+    _cagr = _earnings_cagr(income_list)
+    growth_for_valuation = _first_not_none(_cagr, eps_growth)
+    # Published so the next run shows how often the multi-year rate was actually
+    # available, rather than leaving it to be guessed at.
+    growth_basis = ('cagr' if _cagr is not None
+                    else 'yoy' if eps_growth is not None
+                    else 'none')
     intrinsic_value = None
     if eps and eps > 0:
-        g_pct = (eps_growth * 100) if eps_growth is not None else 0.0
+        g_pct = (growth_for_valuation * 100) if growth_for_valuation is not None else 0.0
         g_pct = max(0.0, min(g_pct, 15.0))
-        intrinsic_value = eps * (8.5 + 2 * g_pct)
+        intrinsic_value = eps * (8.5 + 2 * g_pct) * (_GRAHAM_BASE_YIELD / AAA_BOND_YIELD)
 
     margin_of_safety = None
     if intrinsic_value is not None and intrinsic_value > 0 and price and price > 0:
@@ -564,6 +639,7 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         'net_income':            net_income,
         'intrinsic_value':       intrinsic_value,
         'margin_of_safety':      margin_of_safety,
+        'growth_basis':          growth_basis,
         'owner_earnings':        owner_earnings,
         'roic':                  roic,
         'roe':                   roe,

@@ -3,12 +3,20 @@ import json
 import math
 import sys
 
+# Test labels contain arrows and box-drawing characters. On a cp1252 console
+# printing a failure would itself raise UnicodeEncodeError, hiding the very
+# result we need to read.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 sys.path.insert(0, 'pipeline')
 
+import scorer
 from scorer import (
     buffett_score, quality_score, score_from_summary,
     enrich_from_edgar, enrich_from_fmp, _extract,
     _first_not_none, _is_bank_industry, _normalise_industry,
+    _earnings_cagr,
 )
 from uploader import _sanitize
 from generate_stock_spreadsheets import _fmt
@@ -160,7 +168,15 @@ mock_neg_income = {
     'cashflowStatementHistory': {'cashflowStatements': []},
     'balanceSheetHistory': {'balanceSheetStatements': []},
 }
-check('negative net_income → None', score_from_summary('T', mock_neg_income, 's', 'sp500'), None)
+# A loss-making year is now scored rather than erased: the company survives
+# into the dataset, keeps its reported loss, and simply earns no points for the
+# metrics that require positive earnings.
+_neg = score_from_summary('T', mock_neg_income, 's', 'sp500')
+check('negative net_income is scored, not dropped', _neg is not None, True)
+check('negative net_income preserved',    _neg['net_income'],           -1000.0)
+check('negative net_income scores 0',     _neg['score'],                 0.0)
+check('negative net_income no owner earnings', _neg['owner_earnings'],   None)
+check('negative net_income no intrinsic value', _neg['intrinsic_value'], None)
 check('empty summary → None', score_from_summary('T', {}, 's', 'sp500'), None)
 check('None summary → None', score_from_summary('T', None, 's', 'sp500'), None)
 
@@ -506,6 +522,130 @@ del _no_mc_no_fcf['financialData']['freeCashflow']
 no_mc_no_fcf = score_from_summary('NOMC2', _no_mc_no_fcf, 's', 'i')
 check('no market cap → FCF cannot inflate score',
       no_mc['score'], no_mc_no_fcf['score'])
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Graham growth rate — multi-year CAGR, not a single year-over-year jump
+# ────────────────────────────────────────────────────────────────────────────
+def _income(*net_incomes):
+    """Annual income statements, newest first."""
+    return [{'netIncome': ni, 'totalRevenue': 1e9} for ni in net_incomes]
+
+# 100 -> 133.1 over three years is exactly 10%/yr.
+check('cagr 10pct',        _earnings_cagr(_income(133.1, 121.0, 110.0, 100.0)), 0.10, tol=1e-9)
+check('cagr flat',         _earnings_cagr(_income(100, 100, 100)),              0.0,  tol=1e-9)
+check('cagr declining',    _earnings_cagr(_income(81, 90, 100))  < 0,           True)
+check('cagr too few years',_earnings_cagr(_income(120, 100)),                   None)
+check('cagr empty',        _earnings_cagr([]),                                  None)
+check('cagr negative start',_earnings_cagr(_income(100, 50, -10)),              None)
+check('cagr negative end',  _earnings_cagr(_income(-10, 50, 100)),              None)
+check('cagr missing field', _earnings_cagr([{'netIncome': 100}, {}, {'netIncome': 50}]), None)
+
+# A single spike year must no longer drive the valuation. Same company, same
+# latest earnings; one has a flat history, one a one-off jump.
+def _summary_for_growth(incomes):
+    return {
+        'price': {'marketCap': 1e10},
+        'financialData': {'currentPrice': 100.0, 'totalRevenue': 1e9},
+        'defaultKeyStatistics': {'trailingEps': 5.0},
+        'incomeStatementHistory': {'incomeStatementHistory': _income(*incomes)},
+    }
+
+steady = score_from_summary('STDY', _summary_for_growth([110, 105, 100, 95]), 's', 'i')
+spike  = score_from_summary('SPIK', _summary_for_growth([110, 55, 52, 50]),   's', 'i')
+check('steady grower has intrinsic value', steady['intrinsic_value'] is not None, True)
+# The spike company's CAGR (~30%) clamps to 15; the steady one's is ~5%.
+check('spike valued above steady',  spike['intrinsic_value'] > steady['intrinsic_value'], True)
+# Clamp holds: 15% growth caps the multiplier at 8.5 + 30 = 38.5.
+check('growth multiplier clamped',  spike['intrinsic_value'], 5.0 * 38.5, tol=1e-6)
+
+# growth_basis records which rate was actually used, so the next pipeline run
+# reveals how often multi-year history was available.
+check('growth_basis cagr', steady['growth_basis'], 'cagr')
+check('growth_basis yoy',
+      score_from_summary('YOY', _summary_for_growth([120, 100]), 's', 'i')['growth_basis'],
+      'yoy')
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Graham AAA bond-yield adjustment
+# ────────────────────────────────────────────────────────────────────────────
+check('default yield is a no-op', scorer.AAA_BOND_YIELD, 4.4)
+
+_baseline_iv = steady['intrinsic_value']
+_saved_yield = scorer.AAA_BOND_YIELD
+try:
+    scorer.AAA_BOND_YIELD = 8.8  # double the base yield
+    halved = score_from_summary('STDY', _summary_for_growth([110, 105, 100, 95]), 's', 'i')
+    check('doubling the AAA yield halves intrinsic value',
+          halved['intrinsic_value'], _baseline_iv / 2, tol=1e-6)
+    check('higher yield lowers margin of safety',
+          halved['margin_of_safety'] < steady['margin_of_safety'], True)
+finally:
+    scorer.AAA_BOND_YIELD = _saved_yield
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Owner earnings must be measured, not assumed
+# ────────────────────────────────────────────────────────────────────────────
+_oe_base = {
+    'price': {'marketCap': 1e10},
+    'financialData': {'currentPrice': 100.0, 'totalRevenue': 1e9},
+    'defaultKeyStatistics': {'trailingEps': 5.0},
+    'incomeStatementHistory': {'incomeStatementHistory': _income(2e8, 1.9e8, 1.8e8)},
+}
+oe_missing = score_from_summary('OEM', _oe_base, 's', 'i')
+check('owner earnings None when D&A and capex missing', oe_missing['owner_earnings'], None)
+
+_oe_full = json.loads(json.dumps(_oe_base))
+_oe_full['cashflowStatementHistory'] = {'cashflowStatements': [
+    {'depreciation': 5e7, 'capitalExpenditures': -3e7,
+     'totalCashFromOperatingActivities': 2.5e8},
+]}
+oe_present = score_from_summary('OEP', _oe_full, 's', 'i')
+check('owner earnings computed when inputs present',
+      oe_present['owner_earnings'], 2e8 + 5e7 - 3e7, tol=1.0)
+check('measured owner earnings scores above unmeasured',
+      oe_present['score'] > oe_missing['score'], True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Gross margin trend in percentage points
+# ────────────────────────────────────────────────────────────────────────────
+def _gm_summary(*pairs):
+    """pairs: (gross_profit, revenue), newest first."""
+    return {
+        'price': {'marketCap': 1e10},
+        'financialData': {'currentPrice': 100.0, 'totalRevenue': pairs[0][1]},
+        'defaultKeyStatistics': {'trailingEps': 5.0},
+        'incomeStatementHistory': {'incomeStatementHistory': [
+            {'grossProfit': gp, 'totalRevenue': rv, 'netIncome': 1e8}
+            for gp, rv in pairs
+        ]},
+    }
+
+# 52.5% now vs 50.0% then = +2.5 percentage points (relative change was +5%).
+expanding = score_from_summary('EXP', _gm_summary((525, 1000), (500, 1000)), 's', 'i')
+check('gm trend is percentage points', expanding['gross_margin_trend'], 0.025, tol=1e-9)
+
+# A low-margin business moving 4.0% -> 4.2% is +0.2pp, not the +5% the old
+# relative measure reported — it must no longer earn the top band.
+thin = score_from_summary('THIN', _gm_summary((42, 1000), (40, 1000)), 's', 'i')
+check('thin margin move is small in points', thin['gross_margin_trend'], 0.002, tol=1e-9)
+check('thin margin scores below real expansion',
+      thin['quality_score'] < expanding['quality_score'], True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Earnings consistency scaled to available history
+# ────────────────────────────────────────────────────────────────────────────
+short_clean = score_from_summary('SHRT', _summary_for_growth([100, 95]), 's', 'i')
+long_clean  = score_from_summary('LONG', _summary_for_growth([100, 95, 90, 85]), 's', 'i')
+check('two clean years score as consistent', short_clean['earnings_consistency'], 4)
+check('four clean years score as consistent', long_clean['earnings_consistency'], 4)
+
+mixed = score_from_summary('MIXD', _summary_for_growth([100, -5, 90, 85]), 's', 'i')
+check('one loss year reduces consistency', mixed['earnings_consistency'], 3)
 
 
 # ────────────────────────────────────────────────────────────────────────────
