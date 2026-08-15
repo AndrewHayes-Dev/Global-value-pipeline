@@ -32,6 +32,10 @@ _PREFILTER_MIN_MARKET_CAP = 50_000_000    # $50M floor
 _PREFILTER_MIN_AVG_VOLUME = 50_000        # shares/day floor
 _PREFILTER_MAX_PE         = 150           # excludes distressed/bubble P/E
 
+# The quote endpoint takes a comma-separated ticker list. 50 per request was
+# verified to return all 50 rows, for US and .AX symbols alike.
+_QUOTE_BATCH_SIZE = 50
+
 # cashflow-statement-v2 field name → the Yahoo field scorer.py reads.
 # Module-level so the test suite asserts against the mapping the fetcher
 # actually uses: D&A and buybacks were previously spelled
@@ -150,6 +154,43 @@ class YHFinanceFetcher:
             print(f'  YHFinance quote [{symbol}]: {e}')
         return None
 
+    def quotes_batch(self, symbols: list, chunk: int = _QUOTE_BATCH_SIZE) -> dict:
+        """
+        Fetch quote data for many symbols at once. The quote endpoint accepts a
+        comma-separated ticker list — verified at 50 per request for both US and
+        .AX symbols — so screening a sector costs ceil(n/50) requests instead of
+        one per candidate.
+
+        Returns {symbol: quote_dict} keyed by the symbol the API echoes back.
+        Symbols the API omits are simply absent, and the caller treats a missing
+        quote the same as a failed one.
+        """
+        out: dict = {}
+        for i in range(0, len(symbols), chunk):
+            batch = symbols[i:i + chunk]
+            joined = ','.join(urllib.parse.quote(s) for s in batch)
+            url = f'{_RAPID_BASE}/api/yahoo/qu/quote/{joined}'
+            try:
+                r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
+                for delay in (_RETRY_DELAY, _RETRY_DELAY_2):
+                    if r.status_code != 429:
+                        break
+                    print(f'  YHFinance rate limit [quotes x{len(batch)}] — waiting {delay}s')
+                    time.sleep(delay)
+                    r = self.session.get(url, headers=_RAPID_HEADERS, timeout=_TIMEOUT)
+                if r.status_code != 200:
+                    print(f'  YHFinance quotes batch: HTTP {r.status_code}')
+                    continue
+                body = r.json().get('body')
+                rows = body if isinstance(body, list) else ([body] if isinstance(body, dict) else [])
+                for row in rows:
+                    sym = row.get('symbol')
+                    if sym:
+                        out[sym] = row
+            except Exception as e:
+                print(f'  YHFinance quotes batch: {e}')
+        return out
+
     @staticmethod
     def _passes_prefilter(q: dict) -> bool:
         """
@@ -179,17 +220,23 @@ class YHFinanceFetcher:
 
         return True
 
-    def quote_summary(self, symbol: str) -> Optional[dict]:
+    def quote_summary(self, symbol: str, quote_data: Optional[dict] = None) -> Optional[dict]:
         """
         Fetch and adapt YH Finance data to Yahoo quoteSummary format for scorer.py.
-        Cheap pre-filter first: a single quote-endpoint call screens out weak
-        candidates (unprofitable, illiquid, distressed P/E, sub-$50M market cap)
-        before spending the 7 module calls. Fetches standard + v2 modules
-        concurrently for survivors; adapts v2 to Yahoo list format.
+        Cheap pre-filter first: quote-endpoint fields screen out weak candidates
+        (unprofitable, illiquid, distressed P/E, sub-$50M market cap) before
+        spending the module calls. Fetches standard + v2 modules concurrently for
+        survivors; adapts v2 to Yahoo list format.
+
+        Pass [quote_data] from quotes_batch() to reuse an already-fetched quote —
+        callers that screen a whole sector at once should, so the quote is not
+        paid for twice. Omit it and a single quote request is made here.
+
         Returns None if the pre-filter rejects, or if financial-data and
         default-key-statistics are both empty after the full fetch.
         """
-        quote_data = self._fetch_quote(symbol)
+        if quote_data is None:
+            quote_data = self._fetch_quote(symbol)
         if not quote_data or not self._passes_prefilter(quote_data):
             return None
 
@@ -318,6 +365,65 @@ class YHFinanceFetcher:
             'cashflowStatementHistory': {'cashflowStatements': cf_rows},
             'balanceSheetHistory':     {'balanceSheetStatements': bs_rows},
         }
+
+    def analyst_extras(self, symbol: str) -> dict:
+        """
+        Analyst and calendar data: three module calls, so this is reserved for
+        the handful of stocks actually published per sector rather than every
+        screening candidate.
+
+        All three modules cover .AX as well as US. The one caveat is
+        earnings-trend, whose quarterly periods ('0q', '+1q') are empty for ASX
+        companies — they report half-yearly — while the annual periods carry
+        full estimates. Reading '+1y' therefore works for both markets.
+
+        Missing values come back as None; a field this API leaves blank is
+        represented as an empty list rather than null, which _raw/_fmt absorb.
+        """
+        def _raw(v):
+            return v.get('raw') if isinstance(v, dict) else None
+
+        def _fmt(v):
+            return v.get('fmt') if isinstance(v, dict) else None
+
+        out = {
+            'next_earnings_date':      None,
+            'ex_dividend_date':        None,
+            'analyst_rating':          None,
+            'analyst_count':           None,
+            'eps_estimate_next_year':  None,
+            'revenue_growth_estimate': None,
+        }
+
+        cal = self._fetch_module(symbol, 'calendar-events') or {}
+        earnings = cal.get('earnings') or {}
+        dates = earnings.get('earningsDate') or []
+        if dates and isinstance(dates[0], dict):
+            out['next_earnings_date'] = dates[0].get('fmt')
+        out['ex_dividend_date'] = _fmt(cal.get('exDividendDate'))
+
+        # Consensus on Yahoo's scale: 1 = strong buy ... 5 = strong sell.
+        rec = self._fetch_module(symbol, 'recommendation-trend') or {}
+        trend = rec.get('trend') or []
+        if trend and isinstance(trend[0], dict):
+            latest = trend[0]
+            weights = {'strongBuy': 1, 'buy': 2, 'hold': 3, 'sell': 4, 'strongSell': 5}
+            counts = {k: (latest.get(k) or 0) for k in weights}
+            total = sum(counts.values())
+            if total:
+                out['analyst_rating'] = round(
+                    sum(counts[k] * w for k, w in weights.items()) / total, 2)
+                out['analyst_count'] = total
+
+        est = self._fetch_module(symbol, 'earnings-trend') or {}
+        for entry in (est.get('trend') or []):
+            if not isinstance(entry, dict) or entry.get('period') != '+1y':
+                continue
+            out['eps_estimate_next_year'] = _raw((entry.get('earningsEstimate') or {}).get('avg'))
+            out['revenue_growth_estimate'] = _raw((entry.get('revenueEstimate') or {}).get('growth'))
+            break
+
+        return out
 
     def chart(self, symbol: str) -> Optional[dict]:
         """Fetch current quote for an index or stock. Returns Yahoo-compatible dict."""

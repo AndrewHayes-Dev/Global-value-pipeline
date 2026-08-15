@@ -116,12 +116,18 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
     print(f'    Screening {sector_id}: {len(sector_constituents)} candidates')
     scored = []
 
+    # One batched quote request per 50 candidates instead of one per candidate.
+    quotes = yahoo.quotes_batch([e['ticker'] for e in sector_constituents])
+
     for entry in sector_constituents:
         ticker   = entry['ticker']
         industry = entry.get('industry', '')
+        quote    = quotes.get(ticker)
+        # Screen on the batched quote, so rejects cost no further requests.
+        if not quote or not YHFinanceFetcher._passes_prefilter(quote):
+            continue
         try:
-            yahoo_symbol = ticker
-            summary = yahoo.quote_summary(yahoo_symbol)
+            summary = yahoo.quote_summary(ticker, quote_data=quote)
             stock = score_from_summary(ticker, summary, sector_id, index_id, industry) if summary else None
             if stock:
                 scored.append(stock)
@@ -148,6 +154,8 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
             if edgar_data:
                 stock = enrich_from_edgar(stock, edgar_data)
             time.sleep(0.1)
+        # Analyst/calendar data costs 3 requests, so only the published stocks get it.
+        stock.update(yahoo.analyst_extras(stock['ticker']))
         enriched.append(stock)
     enriched.sort(key=lambda s: s['score'], reverse=True)
 
@@ -164,11 +172,19 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
     print(f'    Screening {sector_id}: {len(tickers)} tickers')
     scored = []
 
+    symbols = {t: (t if '.' in t else f'{t}.AX') for t in tickers}
+    # One batched quote request per 50 candidates instead of one per candidate.
+    quotes = yahoo.quotes_batch(list(symbols.values()))
+
     for ticker in tickers:
-        symbol = ticker if '.' in ticker else f'{ticker}.AX'
+        symbol = symbols[ticker]
         industry = sector_industries.get(ticker, '')
+        quote = quotes.get(symbol)
+        # Screen on the batched quote, so rejects cost no further requests.
+        if not quote or not YHFinanceFetcher._passes_prefilter(quote):
+            continue
         try:
-            summary = yahoo.quote_summary(symbol)
+            summary = yahoo.quote_summary(symbol, quote_data=quote)
             stock = score_from_summary(ticker, summary, sector_id, 'xao', industry) if summary else None
             if stock:
                 scored.append(stock)
@@ -178,6 +194,9 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
 
     scored.sort(key=lambda s: s.get('blended_score', s['score']), reverse=True)
     top_survivors = scored[:top_n]
+    # Analyst/calendar data costs 3 requests, so only the published stocks get it.
+    for s in top_survivors:
+        s.update(yahoo.analyst_extras(symbols[s['ticker']]))
     stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top_survivors, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
@@ -224,6 +243,14 @@ def _format_stock(s: dict, rank: int) -> dict:
         'ps_ratio':             s.get('ps_ratio'),
         'operating_margin':     s.get('operating_margin'),
         'gross_margin_trend':   s.get('gross_margin_trend'),
+        # Analyst/calendar extras — only fetched for published stocks, so these
+        # are None for anything that did not make its sector's top N.
+        'next_earnings_date':      s.get('next_earnings_date'),
+        'ex_dividend_date':        s.get('ex_dividend_date'),
+        'analyst_rating':          s.get('analyst_rating'),
+        'analyst_count':           s.get('analyst_count'),
+        'eps_estimate_next_year':  s.get('eps_estimate_next_year'),
+        'revenue_growth_estimate': s.get('revenue_growth_estimate'),
     }
 
 

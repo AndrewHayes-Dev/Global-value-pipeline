@@ -735,6 +735,90 @@ check('dropping the field-less balance rows changes nothing',
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Batched quotes and analyst extras
+# ────────────────────────────────────────────────────────────────────────────
+class _FakeResp:
+    def __init__(self, rows): self._rows = rows; self.status_code = 200
+    def json(self): return {'body': self._rows}
+
+
+class _FakeSession:
+    """Records each batched quote URL and echoes a row per requested ticker."""
+    def __init__(self): self.urls = []
+    def get(self, url, **kw):
+        self.urls.append(url)
+        tickers = url.rsplit('/', 1)[-1].split(',')
+        return _FakeResp([{'symbol': t, 'marketCap': 1e9} for t in tickers])
+
+
+_bf = YHFinanceFetcher()
+_bf.session = _FakeSession()
+_symbols = [f'T{i}' for i in range(120)]
+_batched = _bf.quotes_batch(_symbols, chunk=50)
+check('quotes_batch splits 120 symbols into 3 requests', len(_bf.session.urls), 3)
+check('quotes_batch returns every symbol', len(_batched), 120)
+check('quotes_batch keys by symbol', _batched['T7']['marketCap'], 1e9)
+
+# A short list must still be one request, not one per symbol.
+_bf2 = YHFinanceFetcher(); _bf2.session = _FakeSession()
+_bf2.quotes_batch(['AAPL', 'MSFT', 'BHP.AX'], chunk=50)
+check('quotes_batch sends one request for a short list', len(_bf2.session.urls), 1)
+
+# quote_summary must reuse a supplied quote rather than re-fetching it.
+_qs = YHFinanceFetcher()
+_qs_calls = []
+_qs._fetch_quote = lambda sym: _qs_calls.append(sym)  # noqa: E731
+# marketCap below the floor, so the prefilter rejects and no modules are fetched.
+check('quote_summary with supplied quote skips the quote request',
+      _qs.quote_summary('AAPL', quote_data={'epsTrailingTwelveMonths': 1.0,
+                                            'marketCap': 1.0}), None)
+check('quote_summary did not call _fetch_quote', _qs_calls, [])
+
+# analyst_extras parsing, using the shapes the API really returns. ASX leaves
+# unavailable values as [] rather than null, and its quarterly earnings-trend
+# periods are empty — '+1y' is the entry that carries data for both markets.
+_extras_bodies = {
+    'calendar-events': {
+        'earnings': {'earningsDate': [{'raw': 1786947120, 'fmt': '2026-08-17'}]},
+        'exDividendDate': {'raw': 1772668800, 'fmt': '2026-03-05'},
+        'dividendDate': [],
+    },
+    'recommendation-trend': {
+        'trend': [{'period': '0m', 'strongBuy': 2, 'buy': 2, 'hold': 12,
+                   'sell': 0, 'strongSell': 1},
+                  {'period': '-1m', 'strongBuy': 9, 'buy': 9, 'hold': 0,
+                   'sell': 0, 'strongSell': 0}],
+    },
+    'earnings-trend': {
+        'trend': [
+            {'period': '0q', 'growth': [], 'earningsEstimate': {'avg': []},
+             'revenueEstimate': {'avg': [], 'growth': []}},
+            {'period': '+1y', 'earningsEstimate': {'avg': {'raw': 2.54526}},
+             'revenueEstimate': {'avg': {'raw': 5.68e10}, 'growth': {'raw': 0.0095}}},
+        ],
+    },
+}
+_ae = YHFinanceFetcher()
+_ae._fetch_module = lambda sym, mod: _extras_bodies.get(mod)  # noqa: E731
+_ex = _ae.analyst_extras('BHP.AX')
+check('analyst_extras next earnings date', _ex['next_earnings_date'], '2026-08-17')
+check('analyst_extras ex-dividend date', _ex['ex_dividend_date'], '2026-03-05')
+# (2*1 + 2*2 + 12*3 + 0*4 + 1*5) / 17 = 47/17 = 2.7647 -> 2.76
+check('analyst_extras rating uses the latest period', _ex['analyst_rating'], 2.76)
+check('analyst_extras counts the analysts', _ex['analyst_count'], 17)
+check('analyst_extras reads +1y EPS, not the empty quarter',
+      _ex['eps_estimate_next_year'], 2.54526)
+check('analyst_extras reads +1y revenue growth',
+      _ex['revenue_growth_estimate'], 0.0095)
+
+# Empty modules must yield Nones, not raise.
+_ae_empty = YHFinanceFetcher()
+_ae_empty._fetch_module = lambda sym, mod: None  # noqa: E731
+check('analyst_extras tolerates missing modules',
+      set(_ae_empty.analyst_extras('X').values()), {None})
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()
