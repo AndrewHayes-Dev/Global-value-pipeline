@@ -32,6 +32,18 @@ _PREFILTER_MIN_MARKET_CAP = 50_000_000    # $50M floor
 _PREFILTER_MIN_AVG_VOLUME = 50_000        # shares/day floor
 _PREFILTER_MAX_PE         = 150           # excludes distressed/bubble P/E
 
+# cashflow-statement-v2 field name → the Yahoo field scorer.py reads.
+# Module-level so the test suite asserts against the mapping the fetcher
+# actually uses: D&A and buybacks were previously spelled
+# 'cash_flow_statement_depreciation_and_amortization' and 'commonrepurchased',
+# names the API never returns, so both silently mapped to nothing.
+_CF_V2_FIELD_MAP = {
+    'ncfo':              'totalCashFromOperatingActivities',
+    'capex':             'capitalExpenditures',
+    'totalDepAmorCF':    'depreciation',
+    'commonRepurchased': 'repurchaseOfStock',
+}
+
 
 # ── YH Finance (yahoo-finance15) ──────────────────────────────────────────────
 
@@ -232,13 +244,7 @@ class YHFinanceFetcher:
                     row['operatingIncome'] = {'raw': val}
 
         # ── cashflow-statement-v2 → cashflowStatementHistory ──────────────────
-        cf_field_map = {
-            'ncfo':  'totalCashFromOperatingActivities',
-            'capex': 'capitalExpenditures',
-            'cash_flow_statement_depreciation_and_amortization': 'depreciation',
-            'commonrepurchased': 'repurchaseOfStock',
-        }
-        cf_rows = self._v2_to_annual_list(cf_v2, cf_field_map)
+        cf_rows = self._v2_to_annual_list(cf_v2, _CF_V2_FIELD_MAP)
 
         # ── balance-sheet-v2 → balanceSheetHistory ────────────────────────────
         bs_field_map = {
@@ -275,14 +281,20 @@ class YHFinanceFetcher:
                     if 'totalStockholderEquity' in row:
                         row['stockholdersEquity'] = row['totalStockholderEquity']
 
-        if not cf_rows:
-            cf_std = self._fetch_module(symbol, 'cash-flow-statement')
-            if cf_std:
-                fallback = cf_std.get('cashflowStatementHistory')
-                if isinstance(fallback, list):
-                    cf_rows = fallback
-                elif isinstance(fallback, dict):
-                    cf_rows = fallback.get('cashflowStatements') or []
+        # No cash-flow fallback: the standard module is a dead end. It was being
+        # requested as 'cash-flow-statement', which is not a module name — the API
+        # answers HTTP 200 with an HTML error page, so r.json() raised once per ASX
+        # stock. The real name is 'cashflow-statement', but that module carries only
+        # endDate/maxAge/netIncome for every ticker checked (8 ASX and 6 US,
+        # AAPL included) — none of the _CF_V2_FIELD_MAP targets. Calling it would
+        # spend a request per ASX stock to learn nothing.
+        #
+        # ASX has no -v2 coverage at all (income, balance-sheet and cashflow v2 all
+        # return body: null), so cf_rows stays empty for ASX. scorer.py already
+        # falls back to financialData.operatingCashflow and financialData.freeCashflow,
+        # which are populated for ASX. capex, D&A and buybacks have no ASX source
+        # here, so owner_earnings and the buyback half of shareholder_yield stay
+        # None for ASX rather than being guessed at.
 
         # ── price / summaryDetail from quote (authoritative) + fin/stats fallback ──
         long_name = profile.get('longName') or ''

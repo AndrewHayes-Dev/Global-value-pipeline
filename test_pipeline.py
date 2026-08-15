@@ -649,6 +649,44 @@ check('one loss year reduces consistency', mixed['earnings_consistency'], 3)
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# cashflow-statement-v2 field mapping
+#
+# The v2 keys for D&A and buybacks were spelled
+# 'cash_flow_statement_depreciation_and_amortization' and 'commonrepurchased',
+# neither of which the API returns. Both silently mapped to nothing, so every
+# US stock lost `depreciation` and `repurchaseOfStock` — and with D&A missing,
+# owner_earnings fell back to None for the entire universe.
+# ────────────────────────────────────────────────────────────────────────────
+from fetcher import YHFinanceFetcher, _CF_V2_FIELD_MAP   # noqa: E402
+
+# Keys and values are real AAPL figures from the live cashflow-statement-v2 body.
+_cf_v2 = {
+    'ncfo':              {'TTM': 146724000000, '2025-09-27': 111482000000},
+    'capex':             {'TTM': -10041000000, '2025-09-27': -12715000000},
+    'totalDepAmorCF':    {'TTM': 13100000000,  '2025-09-27': 11698000000},
+    'commonRepurchased': {'TTM': -88929000000, '2025-09-27': -96671000000},
+}
+# Deliberately the production map, so a renamed key fails here.
+_cf_rows = YHFinanceFetcher()._v2_to_annual_list(_cf_v2, _CF_V2_FIELD_MAP)
+check('v2 cashflow yields one annual row', len(_cf_rows), 1)
+check('v2 maps operating cash flow',
+      _cf_rows[0].get('totalCashFromOperatingActivities'), {'raw': 111482000000})
+check('v2 maps capex',
+      _cf_rows[0].get('capitalExpenditures'), {'raw': -12715000000})
+check('v2 maps D&A (totalDepAmorCF)',
+      _cf_rows[0].get('depreciation'), {'raw': 11698000000})
+check('v2 maps buybacks (commonRepurchased)',
+      _cf_rows[0].get('repurchaseOfStock'), {'raw': -96671000000})
+
+# With D&A and capex now mapped, owner earnings is computable end to end.
+_oe_v2 = json.loads(json.dumps(_oe_base))
+_oe_v2['cashflowStatementHistory'] = {'cashflowStatements': _cf_rows}
+_oe_from_v2 = score_from_summary('OEV2', _oe_v2, 's', 'i')
+check('owner earnings computed from v2 cashflow map',
+      _oe_from_v2['owner_earnings'], 2e8 + 11698000000 - 12715000000, tol=1.0)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()
