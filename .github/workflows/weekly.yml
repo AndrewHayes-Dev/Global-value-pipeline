@@ -2,14 +2,71 @@ name: Global Weekly Data Pipeline
 
 on:
   schedule:
-    - cron: '0 7 * * 0'   # every Sunday at 7am UTC
+    # Target: Sunday 06:37 Australia/Sydney, for every index in one run.
+    #
+    # Biased ~20 minutes early on purpose. GitHub queues scheduled workflows,
+    # and the previous '0 7 * * 0' slot started 1-2 hours late every single week
+    # (07:52, 09:07, 09:11, 09:04, 09:01 UTC against a 07:00 nominal) because the
+    # top of the hour is heavily contended. An odd minute in a quiet UTC slot,
+    # aimed slightly early, lands the real start near 7am Sydney.
+    #
+    # GitHub cron is UTC-only and has no DST awareness, so Sydney's two offsets
+    # need one line each. The 'gate' job below stops whichever line does not
+    # match the offset actually in force that week, so exactly one run happens.
+    - cron: '37 20 * * 6'   # 06:37 AEST (UTC+10) — Sydney winter
+    - cron: '37 19 * * 6'   # 06:37 AEDT (UTC+11) — Sydney summer
   workflow_dispatch:        # allows manual run from GitHub Actions UI
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Decides whether this trigger owns the week. Kept as a separate job so the
+  # losing cron line leaves a *skipped* pipeline job rather than a failed one —
+  # a red X every week would drown out real failures.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Match the firing cron against Sydney's current UTC offset
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != 'schedule' ]; then
+            echo "Triggered by $EVENT_NAME — running unconditionally."
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          offset=$(TZ=Australia/Sydney date +%z)
+          case "$offset" in
+            +1000) want='37 20 * * 6' ;;   # AEST
+            +1100) want='37 19 * * 6' ;;   # AEDT
+            *)
+              echo "::error::Unexpected Australia/Sydney UTC offset: $offset"
+              exit 1
+              ;;
+          esac
+
+          if [ "$SCHEDULE" = "$want" ]; then
+            echo "Sydney is at $offset; '$SCHEDULE' owns this week. Running."
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Sydney is at $offset; '$want' owns this week. Skipping '$SCHEDULE'."
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Sydney local time now: $(TZ=Australia/Sydney date '+%Y-%m-%d %H:%M:%S %Z')"
+
   pipeline:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
