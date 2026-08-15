@@ -243,7 +243,11 @@ def main():
 
     # ── XAO dynamic constituents ──────────────────────────────────────────────────────────────────────────
     print('Fetching XAO stock universe from iShares IOZ...')
-    ioz_constituents = fetch_ioz_constituents(top_n=200)
+    try:
+        ioz_constituents = fetch_ioz_constituents(top_per_sector=10)
+    except Exception as e:
+        print(f'  WARNING: IOZ fetch failed — XAO sectors will be empty: {e}')
+        ioz_constituents = []
     ioz_by_sector    = _group_by_sector(ioz_constituents, 'xao')
     count = sum(len(v['stocks']) for v in ioz_by_sector.values())
     print(f'  IOZ loaded: {count} stocks across {len(ioz_by_sector)} sectors')

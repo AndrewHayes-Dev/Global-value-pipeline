@@ -721,7 +721,6 @@ def fetch_iwm_constituents(top_per_sector: int = 10) -> list:
 
 _IOZ_PRODUCT_URL  = 'https://www.blackrock.com/au/individual/products/251852/ishares-core-s-and-p-asx-200-etf'
 _IOZ_PCF_URL      = 'https://www.blackrock.com/au/literature/pcf/pcf-ioz-en_au.csv'
-_ASX_COMPANIES_URL = 'https://www.asx.com.au/asx/research/ASXListedCompanies.csv'
 _IOZ_HEADERS = {
     'User-Agent':      ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                         'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -735,39 +734,16 @@ _IOZ_HEADERS = {
     'Connection':      'keep-alive',
 }
 
-_GICS_INDUSTRY_GROUP_TO_SECTOR: dict = {
-    'Energy':                                           'Energy',
-    'Materials':                                        'Materials',
-    'Capital Goods':                                    'Industrials',
-    'Commercial & Professional Services':               'Industrials',
-    'Transportation':                                   'Industrials',
-    'Automobiles & Components':                         'Consumer Discretionary',
-    'Consumer Durables & Apparel':                      'Consumer Discretionary',
-    'Consumer Services':                                'Consumer Discretionary',
-    'Consumer Discretionary Distribution & Retail':     'Consumer Discretionary',
-    'Consumer Staples Distribution & Retail':           'Consumer Staples',
-    'Food, Beverage & Tobacco':                         'Consumer Staples',
-    'Household & Personal Products':                    'Consumer Staples',
-    'Health Care Equipment & Services':                 'Health Care',
-    'Pharmaceuticals, Biotechnology & Life Sciences':   'Health Care',
-    'Banks':                                            'Financials',
-    'Financial Services':                               'Financials',
-    'Insurance':                                        'Financials',
-    'Software & Services':                              'Information Technology',
-    'Technology Hardware & Equipment':                  'Information Technology',
-    'Semiconductors & Semiconductor Equipment':         'Information Technology',
-    'Telecommunication Services':                       'Communication Services',
-    'Media & Entertainment':                            'Communication Services',
-    'Utilities':                                        'Utilities',
-    'Equity Real Estate Investment Trusts (REITs)':     'Real Estate',
-    'Real Estate Management & Development':             'Real Estate',
-}
+# Holdings enriched with Yahoo sector data, by market value. Mirrors the 150
+# used for SPSM — enough to populate all 11 GICS sectors without over-spending
+# asset-profile calls on the long tail of the index.
+_IOZ_UNIVERSE_SIZE = 150
 
 
 def _isin_to_asx_ticker(isin: str) -> Optional[str]:
     """
     Extract ASX ticker from a 12-char AU ISIN (e.g. AU000000BHP1 → BHP).
-    Returns None for numeric NSINs — those require name-based fallback.
+    Returns None for numeric NSINs, which carry no ticker to extract.
     """
     if not isin or not isin.startswith('AU') or len(isin) != 12:
         return None
@@ -777,75 +753,38 @@ def _isin_to_asx_ticker(isin: str) -> Optional[str]:
     return ticker
 
 
-def _normalize_asx_name(name: str) -> str:
-    """Normalise a company name for approximate matching against ASX CSV."""
-    name = name.upper().strip().rstrip('.,')  # strip trailing punctuation first
-    for suffix in (
-        ' LIMITED', ' LTD', ' STAPLED UNITS', ' STAPLED UNIT',
-        ' CDI INC', ' CDI CORP', ' CDI INC.', ' CDI',
-        ' CORPORATION', ' CORP', ' INC.', ' INC',
-        ' DEF', ' REIT', ' UNITS', ' UNIT',
-    ):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)].rstrip()
-    return name
-
-
-def fetch_ioz_constituents(top_n: int = 200) -> list:
+def fetch_ioz_constituents(top_per_sector: int = 10) -> list:
     """
-    Downloads the IOZ PCF CSV from BlackRock Australia and the ASX Listed Companies
-    CSV to assign GICS sectors. Pre-fetches the IOZ product page for session cookies.
+    ASX constituents from the iShares IOZ (S&P/ASX 200) PCF CSV, enriched with
+    Yahoo Finance sector data. Mirrors fetch_iwm_constituents: build a universe
+    from the ETF holdings, resolve each holding's GICS sector from YH Finance
+    asset-profile, then return the top top_per_sector stocks per sector.
+
+    Sectors previously came from the ASX Listed Companies CSV, but that endpoint
+    is now behind an Imperva WAF that answers HTTP 200 with a "Request Rejected"
+    HTML body — which silently yielded an empty sector map and dropped every
+    holding. Yahoo is the same source the US small-cap path already relies on.
 
     IOZ PCF columns: PCF Date, Fund Name, Sedol, Security Name, Number of Shares,
                      Security Price, ISIN  (all but first have a leading space).
-    Two-step ticker resolution:
-      1. Alpha ISIN → direct ticker extraction (most large-caps).
-      2. Numeric ISIN → normalised name match against ASX CSV company names.
 
-    Returns list of {ticker, company_name, gics_sector, gics_industry, market_value}
-    sorted by market_value descending, capped at top_n.
+    Returns list of {ticker, company_name, gics_sector, gics_industry, market_value}.
     Raises on any fetch or parse failure — no fallback.
     """
     import csv as _csv
+    from collections import defaultdict
 
-    # ── Step 1: ASX Listed Companies CSV → code→sector + name→code maps ──────
-    asx_sector: dict = {}   # asx_code (upper) → gics industry group
-    asx_name:   dict = {}   # normalised_company_name → asx_code (upper)
-    try:
-        asx_r = requests.get(_ASX_COMPANIES_URL, timeout=30)
-        asx_r.raise_for_status()
-        asx_lines = asx_r.text.splitlines()
-        hdr = next(
-            (i for i, line in enumerate(asx_lines)
-             if 'ASX code' in line or 'ASX Code' in line),
-            None,
-        )
-        if hdr is not None:
-            for row in _csv.DictReader(asx_lines[hdr:]):
-                code = (row.get('ASX code') or row.get('ASX Code') or '').strip().upper()
-                ig   = (row.get('GICS industry group') or
-                        row.get('GICS Industry Group') or '').strip()
-                name = (row.get('Company name') or row.get('Company Name') or '').strip()
-                if code:
-                    asx_sector[code] = ig
-                    norm = _normalize_asx_name(name)
-                    if norm:
-                        asx_name[norm] = code
-        print(f'  ASX CSV: {len(asx_sector)} companies loaded')
-    except Exception as e:
-        raise RuntimeError(f'IOZ: ASX companies CSV failed: {e}')
-
-    # ── Step 2: Pre-fetch IOZ product page for session cookies ────────────────
+    # ── Step 1: Pre-fetch IOZ product page for session cookies ────────────────
     session = requests.Session()
     pre = session.get(_IOZ_PRODUCT_URL, headers=_IOZ_HEADERS, timeout=30)
     pre.raise_for_status()
     time.sleep(1.5)
 
-    # ── Step 3: Download IOZ PCF CSV ──────────────────────────────────────────
+    # ── Step 2: Download IOZ PCF CSV ──────────────────────────────────────────
     r = session.get(_IOZ_PCF_URL, headers=_IOZ_HEADERS, timeout=60)
     r.raise_for_status()
 
-    # ── Step 4: Find header row — contains both "ISIN" and "Sedol" ────────────
+    # ── Step 3: Find header row — contains both "ISIN" and "Sedol" ────────────
     lines = r.text.splitlines()
     hdr = next(
         (i for i, line in enumerate(lines)
@@ -857,12 +796,11 @@ def fetch_ioz_constituents(top_n: int = 200) -> list:
 
     # skipinitialspace strips the leading space from " Fund Name", " ISIN", etc.
     reader = _csv.DictReader(lines[hdr:], skipinitialspace=True)
-    stocks: list = []
-    skipped_no_ticker  = 0
-    skipped_no_sector  = 0
+    candidates: list = []
+    skipped_no_ticker = 0
 
     for row in reader:
-        isin    = (row.get('ISIN') or '').strip()
+        isin     = (row.get('ISIN') or '').strip()
         pcf_name = (row.get('Security Name') or '').strip()
         try:
             shares = float((row.get('Number of Shares') or '0').replace(',', ''))
@@ -873,37 +811,73 @@ def fetch_ioz_constituents(top_n: int = 200) -> list:
         if market_value <= 0:
             continue
 
-        # Step 4a: alpha ISIN → direct ticker
+        # Alpha ISIN → direct ticker. Numeric NSINs needed the ASX CSV name
+        # index to resolve, so they are now unresolvable and get skipped.
         ticker = _isin_to_asx_ticker(isin)
-
-        # Step 4b: numeric NSIN → normalised name lookup
-        if ticker is None:
-            norm = _normalize_asx_name(pcf_name)
-            ticker = asx_name.get(norm)
-
         if not ticker:
             skipped_no_ticker += 1
             continue
 
-        industry_group = asx_sector.get(ticker.upper(), '')
-        gics_sector = _GICS_INDUSTRY_GROUP_TO_SECTOR.get(industry_group)
-        if not gics_sector:
-            skipped_no_sector += 1
-            continue
-
-        stocks.append({
-            'ticker':        ticker,
-            'company_name':  pcf_name,
-            'gics_sector':   gics_sector,
-            'gics_industry': industry_group,
-            'market_value':  market_value,
+        candidates.append({
+            'ticker':       ticker,
+            'company_name': pcf_name,
+            'market_value': market_value,
         })
 
-    stocks.sort(key=lambda x: x['market_value'], reverse=True)
-    result = stocks[:top_n]
+    if not candidates:
+        raise ValueError('IOZ PCF: no resolvable tickers in holdings')
 
-    print(f'  IOZ: {len(result)} stocks selected (top {top_n} by market value, '
-          f'{skipped_no_ticker} no-ticker, {skipped_no_sector} no-sector)')
+    candidates.sort(key=lambda x: x['market_value'], reverse=True)
+    universe = candidates[:_IOZ_UNIVERSE_SIZE]
+    print(f'  IOZ: {len(candidates)} holdings ({skipped_no_ticker} no-ticker); '
+          f'enriching top {len(universe)} with Yahoo Finance sector data')
+
+    # ── Step 4: Fetch Yahoo Finance sector for each stock (parallelised) ──────
+    yf_session = requests.Session()   # separate from the BlackRock CDN session
+
+    def _enrich(stock: dict) -> dict:
+        # ASX tickers are quoted on Yahoo with a .AX suffix (e.g. BHP.AX).
+        symbol = stock['ticker'] if '.' in stock['ticker'] else f'{stock["ticker"]}.AX'
+        try:
+            encoded = urllib.parse.quote(symbol)
+            url = (f'{_RAPID_BASE}/api/v1/markets/stock/modules'
+                   f'?ticker={encoded}&module=asset-profile')
+            resp = yf_session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY)
+                resp = yf_session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(_RETRY_DELAY_2)
+                resp = yf_session.get(url, headers=_RAPID_HEADERS, timeout=20)
+            if resp.status_code == 200:
+                body = resp.json().get('body') or {}
+                yf_sector   = body.get('sector', '')
+                gics_sector = _YF_TO_GICS_SECTOR.get(yf_sector, '')
+                return {
+                    **stock,
+                    'gics_sector':   gics_sector,
+                    'gics_industry': body.get('industry', ''),
+                }
+        except Exception as e:
+            print(f'  IOZ sector [{symbol}]: {e}')
+        return {**stock, 'gics_sector': '', 'gics_industry': ''}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        enriched = list(ex.map(_enrich, universe))
+
+    # ── Step 5: Group by GICS sector; top N per sector by market value ────────
+    by_sector: dict = defaultdict(list)
+    for stock in enriched:
+        if stock['gics_sector']:
+            by_sector[stock['gics_sector']].append(stock)
+
+    result = []
+    for sec, stocks in by_sector.items():
+        stocks.sort(key=lambda x: x['market_value'], reverse=True)
+        result.extend(stocks[:top_per_sector])
+
+    print(f'  IOZ: {len(result)} stocks selected (top {top_per_sector} per sector '
+          f'across {len(by_sector)} sectors)')
     return result
 
 
