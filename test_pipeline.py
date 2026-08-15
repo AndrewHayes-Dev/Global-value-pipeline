@@ -687,6 +687,54 @@ check('owner earnings computed from v2 cashflow map',
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# ASX shape: no balance-sheet or cash-flow rows at all
+#
+# This API has no -v2 coverage for .AX tickers, and the standard balance-sheet
+# and cashflow modules carry no financial fields, so an ASX summary reaches the
+# scorer with both statement lists empty. The single-period figures must still
+# come through from financialData / defaultKeyStatistics, and the genuinely
+# unavailable ones must stay None rather than be invented.
+# ────────────────────────────────────────────────────────────────────────────
+_asx_base = {
+    'financialData': {
+        'currentPrice': 40.0, 'totalDebt': 29195999232, 'currentRatio': 1.649,
+        'debtToEquity': 52.639, 'returnOnEquity': 0.247,
+        'operatingCashflow': 19747000320, 'freeCashflow': 8137124864,
+        'totalRevenue': 53987999744,
+    },
+    'defaultKeyStatistics': {
+        'bookValue': 14.19057, 'sharesOutstanding': 5080690184, 'trailingEps': 3.0,
+    },
+    'price': {'marketCap': 203227607360},
+    'summaryDetail': {'trailingPE': 13.3},
+    'incomeStatementHistory': {'incomeStatementHistory': [
+        {'netIncome': 1.5e10, 'totalRevenue': 5.4e10, 'grossProfit': 2e10},
+        {'netIncome': 1.4e10, 'totalRevenue': 5.2e10, 'grossProfit': 1.9e10},
+    ]},
+    'cashflowStatementHistory': {'cashflowStatements': []},
+    'balanceSheetHistory': {'balanceSheetStatements': []},
+}
+_asx = score_from_summary('ASX', json.loads(json.dumps(_asx_base)), 's', 'i')
+check('ASX debt_equity from financialData', _asx['debt_equity'], 0.52639, tol=1e-9)
+check('ASX current_ratio from financialData', _asx['current_ratio'], 1.649, tol=1e-9)
+check('ASX roe_3yr_avg falls back to roe', _asx['roe_3yr_avg'], 0.247, tol=1e-9)
+check('ASX free_cash_flow from financialData', _asx['free_cash_flow'], 8137124864.0, tol=1.0)
+check('ASX owner_earnings stays None', _asx['owner_earnings'], None)
+check('ASX book_value_growth stays None', _asx['book_value_growth'], None)
+check('ASX net_net_ratio stays None', _asx['net_net_ratio'], None)
+
+# The dropped balance-sheet fallback returned rows carrying only endDate/maxAge.
+# Removing the call must not change a single scored field.
+_asx_stub_rows = json.loads(json.dumps(_asx_base))
+_asx_stub_rows['balanceSheetHistory'] = {'balanceSheetStatements': [
+    {'endDate': {'raw': i}, 'maxAge': 1} for i in range(4)
+]}
+_asx_stub = score_from_summary('ASX', _asx_stub_rows, 's', 'i')
+check('dropping the field-less balance rows changes nothing',
+      _asx_stub, _asx)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()

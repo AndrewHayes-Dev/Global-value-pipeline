@@ -261,7 +261,10 @@ class YHFinanceFetcher:
             if 'totalStockholderEquity' in row:
                 row['stockholdersEquity'] = row['totalStockholderEquity']
 
-        # ── Fallback: standard modules for ASX stocks (v2 returns empty) ──────────
+        # ── Fallback: standard income statement for ASX stocks (v2 returns empty) ──
+        # Only income survives as a fallback. It is already in all_modules above,
+        # so it costs no extra request, and it is genuinely populated (24 fields
+        # for .AX and US alike).
         if not inc_rows:
             fallback = income_std.get('incomeStatementHistory')
             if isinstance(fallback, list):
@@ -269,17 +272,23 @@ class YHFinanceFetcher:
             elif isinstance(fallback, dict):
                 inc_rows = fallback.get('incomeStatementHistory') or []
 
-        if not bs_rows:
-            bs_std = self._fetch_module(symbol, 'balance-sheet')
-            if bs_std:
-                fallback = bs_std.get('balanceSheetHistory')
-                if isinstance(fallback, list):
-                    bs_rows = fallback
-                elif isinstance(fallback, dict):
-                    bs_rows = fallback.get('balanceSheetStatements') or []
-                for row in bs_rows:
-                    if 'totalStockholderEquity' in row:
-                        row['stockholdersEquity'] = row['totalStockholderEquity']
+        # No balance-sheet fallback: the standard 'balance-sheet' module returns
+        # rows of nothing but endDate/maxAge — not one financial field — for every
+        # ticker checked (4 ASX and 2 US, AAPL and MSFT included). It is emptier
+        # than the cash-flow module, which at least carries netIncome. Requesting
+        # it spent a request per ASX stock and yielded 4 rows the scorer reads
+        # nothing out of, so bal_list was non-empty but every _extract returned
+        # None. Dropping it is behaviour-neutral: roe_3yr_avg and
+        # book_value_growth already resolved to None down that path.
+        #
+        # ASX has no -v2 coverage, so bs_rows stays empty for ASX and scorer.py
+        # covers the single-period figures from other modules it already fetches:
+        # debt_equity from financialData.debtToEquity, current_ratio from
+        # financialData.currentRatio, total_debt from financialData.totalDebt, and
+        # equity from defaultKeyStatistics.bookValue x sharesOutstanding.
+        # book_value_growth and net_net_ratio need multi-year equity and current
+        # assets/total liabilities, which nothing here reports for ASX — they stay
+        # None rather than being invented.
 
         # No cash-flow fallback: the standard module is a dead end. It was being
         # requested as 'cash-flow-statement', which is not a module name — the API
