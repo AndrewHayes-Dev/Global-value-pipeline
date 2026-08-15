@@ -336,13 +336,16 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     income_list = (summary.get('incomeStatementHistory') or {}).get('incomeStatementHistory') or []
     cash_list   = (summary.get('cashflowStatementHistory') or {}).get('cashflowStatements') or []
     bal_list    = (summary.get('balanceSheetHistory') or {}).get('balanceSheetStatements') or []
-    bal_list_q  = (summary.get('balanceSheetHistoryQuarterly') or {}).get('balanceSheetStatements') or []
 
     income  = income_list[0] if income_list else {}
     cash    = cash_list[0]   if cash_list   else {}
-    # Use annual balance sheet for single-period calcs; fall back to most recent quarter
-    balance = (bal_list[0] if bal_list else
-               (bal_list_q[0] if bal_list_q else {}))
+    # Annual only. This used to fall back to balanceSheetHistoryQuarterly, a key
+    # no caller has ever set: the fetcher emits balanceSheetHistory alone, the
+    # standard balance-sheet module's quarterly block carries no financial
+    # fields, and balance-sheet-v2 reports one entry per fiscal year-end. The
+    # fallback could not fire, so it is gone rather than left to imply that
+    # quarterly data is available somewhere.
+    balance = bal_list[0] if bal_list else {}
 
     price = _extract(fin, ['currentPrice'])
 
