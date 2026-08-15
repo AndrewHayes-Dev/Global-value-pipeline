@@ -193,12 +193,15 @@ class YHFinanceFetcher:
         if not quote_data or not self._passes_prefilter(quote_data):
             return None
 
+        # income-statement-v2 is deliberately absent: it returns body: null for
+        # every ticker checked (AAPL, MSFT, JPM, XOM, TRV and BHP.AX), so it was
+        # one wasted request per stock on every index. The standard
+        # income-statement below is the real source and always has been.
         all_modules = [
             'financial-data',
             'default-key-statistics',
             'income-statement',
             'asset-profile',
-            'income-statement-v2',
             'cashflow-statement-v2',
             'balance-sheet-v2',
         ]
@@ -218,30 +221,24 @@ class YHFinanceFetcher:
         stats      = raw.get('default-key-statistics') or {}
         income_std = raw.get('income-statement') or {}
         profile    = raw.get('asset-profile') or {}
-        income_v2  = raw.get('income-statement-v2') or {}
         cf_v2      = raw.get('cashflow-statement-v2') or {}
         bs_v2      = raw.get('balance-sheet-v2') or {}
 
         if not fin and not stats:
             return None
 
-        # ── income-statement-v2 → incomeStatementHistory ──────────────────────
-        inc_field_map = {
-            'revenue':         'totalRevenue',
-            'grossProfit':     'grossProfit',
-            'netIncome':       'netIncome',
-            'interestExpense': 'interestExpense',
-        }
-        inc_rows = self._v2_to_annual_list(income_v2, inc_field_map)
-        # ebit maps to both 'ebit' and 'operatingIncome' in scorer
-        if income_v2:
-            ebit_data = income_v2.get('ebit', {})
-            for row in inc_rows:
-                date_str = row.get('endDate', {}).get('fmt', '')
-                val = ebit_data.get(date_str) if isinstance(ebit_data, dict) else None
-                if val is not None:
-                    row['ebit'] = {'raw': val}
-                    row['operatingIncome'] = {'raw': val}
+        # ── income-statement → incomeStatementHistory ─────────────────────────
+        # The standard module already reports the Yahoo field names the scorer
+        # reads, so no mapping is needed. It carries 24 fields for .AX and US
+        # alike — including ebit and operatingIncome, which the removed v2 block
+        # used to synthesise — so ev_ebit, operating_margin and interest_coverage
+        # are unaffected by dropping income-statement-v2.
+        inc_rows: list = []
+        inc_history = income_std.get('incomeStatementHistory')
+        if isinstance(inc_history, list):
+            inc_rows = inc_history
+        elif isinstance(inc_history, dict):
+            inc_rows = inc_history.get('incomeStatementHistory') or []
 
         # ── cashflow-statement-v2 → cashflowStatementHistory ──────────────────
         cf_rows = self._v2_to_annual_list(cf_v2, _CF_V2_FIELD_MAP)
@@ -260,17 +257,6 @@ class YHFinanceFetcher:
         for row in bs_rows:
             if 'totalStockholderEquity' in row:
                 row['stockholdersEquity'] = row['totalStockholderEquity']
-
-        # ── Fallback: standard income statement for ASX stocks (v2 returns empty) ──
-        # Only income survives as a fallback. It is already in all_modules above,
-        # so it costs no extra request, and it is genuinely populated (24 fields
-        # for .AX and US alike).
-        if not inc_rows:
-            fallback = income_std.get('incomeStatementHistory')
-            if isinstance(fallback, list):
-                inc_rows = fallback
-            elif isinstance(fallback, dict):
-                inc_rows = fallback.get('incomeStatementHistory') or []
 
         # No balance-sheet fallback: the standard 'balance-sheet' module returns
         # rows of nothing but endDate/maxAge — not one financial field — for every
