@@ -157,7 +157,9 @@ def process_us_sector(yahoo: YHFinanceFetcher, fmp: FmpFetcher, edgar: EdgarFetc
         # Analyst/calendar data costs 3 requests, so only the published stocks get it.
         stock.update(yahoo.analyst_extras(stock['ticker']))
         enriched.append(stock)
-    enriched.sort(key=lambda s: s['score'], reverse=True)
+    # FMP and EDGAR enrichment both recompute blended_score, so this reads the
+    # post-enrichment value rather than the one selection was based on.
+    enriched = publish_order(enriched)
 
     stocks_out = [_format_stock(s, rank) for rank, s in enumerate(enriched, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
@@ -197,9 +199,26 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
     # Analyst/calendar data costs 3 requests, so only the published stocks get it.
     for s in top_survivors:
         s.update(yahoo.analyst_extras(symbols[s['ticker']]))
+    # Already in this order from the selection sort above; applied anyway so the
+    # ASX and US paths provably publish in the same order.
+    top_survivors = publish_order(top_survivors)
     stocks_out = [_format_stock(s, rank) for rank, s in enumerate(top_survivors, 1)]
     print(f'    Top {len(stocks_out)} for {sector_id}')
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
+
+
+def publish_order(stocks: list[dict]) -> list[dict]:
+    """
+    The order the published three are ranked in, best first.
+
+    Must stay the same key the top-N selection uses. Ranking by 'score' alone
+    meant a stock could be selected for having the sector's best blended score
+    and then displayed last, contradicting the app's own explanation that the
+    list is "ranked by a blended score combining Value (60%) and Quality (40%)".
+    Falls back to 'score' only for a stock that never got a blended one.
+    """
+    return sorted(stocks, key=lambda s: s.get('blended_score', s['score']),
+                  reverse=True)
 
 
 def index_stock_count(sectors_out: list[dict]) -> int:
