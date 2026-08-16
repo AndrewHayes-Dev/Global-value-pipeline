@@ -1,0 +1,65 @@
+name: TZ Probe (Sydney offset)
+
+# Proves the assumption the weekly pipeline's `gate` job rests on: that the
+# runner can resolve Australia/Sydney, and knows the DST rules — not just
+# today's offset. The gate only ever exercises that lookup on a *scheduled*
+# trigger, so without this the first real test would be a live Sunday run.
+#
+# Costs nothing: no RapidAPI calls, no R2 writes, ~5 seconds.
+# Safe to delete once it has gone green.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Resolve Australia/Sydney now
+        run: |
+          set -euo pipefail
+          offset=$(TZ=Australia/Sydney date +%z)
+          echo "Sydney now: $(TZ=Australia/Sydney date '+%Y-%m-%d %H:%M:%S %Z') ($offset)"
+          case "$offset" in
+            +1000|+1100)
+              echo "OK — tzdata resolves Australia/Sydney." ;;
+            *)
+              echo "::error::tzdata missing or wrong on this runner: got '$offset'."
+              echo "::error::The weekly pipeline's gate would take its '*)' branch and skip every run."
+              exit 1 ;;
+          esac
+
+      - name: Resolve the offset at each cron instant across two DST changeovers
+        run: |
+          set -euo pipefail
+          # Each row: <UTC instant a cron line fires>|<cron>|<offset that must own it>.
+          # Spans the Oct 2026 AEST->AEDT and Apr 2027 AEDT->AEST changeovers, so a
+          # tzdata package present but stale on the DST rules still fails here.
+          #
+          # Read line-by-line with IFS='|'. A `for row in $rows` loop would split on
+          # spaces instead of newlines (shredding "37 20 * * 6") and glob-expand the
+          # unquoted asterisks against the working directory.
+          fail=0
+          while IFS='|' read -r instant cron want; do
+            [ -n "$instant" ] || continue
+            got=$(TZ=Australia/Sydney date -d "$instant" +%z)
+            local_time=$(TZ=Australia/Sydney date -d "$instant" '+%a %Y-%m-%d %H:%M %Z')
+            if [ "$got" = "$want" ]; then
+              printf 'OK   %s  cron %-13s -> %s (%s)\n' "$instant" "$cron" "$local_time" "$got"
+            else
+              printf 'FAIL %s  cron %-13s -> %s, wanted %s\n' "$instant" "$cron" "$got" "$want"
+              fail=1
+            fi
+          done <<'ROWS'
+          2026-08-22T20:37:00Z|37 20 * * 6|+1000
+          2026-10-03T19:37:00Z|37 19 * * 6|+1100
+          2027-04-03T20:37:00Z|37 20 * * 6|+1000
+          2027-10-02T19:37:00Z|37 19 * * 6|+1100
+          ROWS
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Sydney DST rules on this runner do not match the pipeline's cron lines."
+            exit 1
+          fi
+          echo "All cron instants map to the offset their gate case expects."
