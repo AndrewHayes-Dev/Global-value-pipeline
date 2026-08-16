@@ -637,6 +637,45 @@ check('thin margin scores below real expansion',
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Gross margin comes from financialData, and a reported zero is not a value
+#
+# The income-statement module carries no gross profit; the adapter surfaced the
+# absence as 0, so `0 / revenue` made gross_margin 0.0 for every stock ever
+# published. That is not merely cosmetic — it zeroed 20 points of quality_score
+# and 5 of buffett_score across the whole universe.
+# ────────────────────────────────────────────────────────────────────────────
+def _fin_gm_summary(fin_extra: dict, gross_profit=None):
+    return {
+        'price': {'marketCap': 1e10},
+        'financialData': {'currentPrice': 100.0, 'totalRevenue': 1000.0, **fin_extra},
+        'defaultKeyStatistics': {'trailingEps': 5.0},
+        'incomeStatementHistory': {'incomeStatementHistory': [
+            {'grossProfit': gross_profit, 'totalRevenue': 1000.0, 'netIncome': 1e8},
+        ]},
+    }
+
+# financialData wins, and the raw-wrapped shape the provider actually sends is
+# unwrapped rather than stringified.
+_fd = score_from_summary('FD', _fin_gm_summary({'grossMargins': {'raw': 0.51614}}), 's', 'i')
+check('gross margin reads financialData.grossMargins', _fd['gross_margin'], 0.51614, tol=1e-9)
+
+# Second choice: grossProfits (plural) over revenue, still without the income statement.
+_gp = score_from_summary('GP', _fin_gm_summary({'grossProfits': 400.0}), 's', 'i')
+check('gross margin falls back to grossProfits/revenue', _gp['gross_margin'], 0.4, tol=1e-9)
+
+# The live regression: nothing in financialData and a zero from the income
+# statement must read as unknown, never as a real 0.0.
+_zero = score_from_summary('ZERO', _fin_gm_summary({}, gross_profit=0), 's', 'i')
+check('a reported zero gross profit is not a margin', _zero['gross_margin'], None)
+check('and its trend is not a fabricated 0.0', _zero['gross_margin_trend'], None)
+
+# The whole point: a real margin has to move the quality score off the floor
+# the dead value pinned every stock to.
+check('a real gross margin outscores the dead zero',
+      _fd['quality_score'] > _zero['quality_score'], True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Earnings consistency scaled to available history
 # ────────────────────────────────────────────────────────────────────────────
 short_clean = score_from_summary('SHRT', _summary_for_growth([100, 95]), 's', 'i')
@@ -821,7 +860,35 @@ check('analyst_extras tolerates missing modules',
 # ────────────────────────────────────────────────────────────────────────────
 # Empty-index guard — a failed upstream fetch must not overwrite good R2 data
 # ────────────────────────────────────────────────────────────────────────────
-from main import index_stock_count
+from main import index_stock_count, publish_order
+
+# ── Publish order matches what the app tells users ──────────────────────────
+# Real values from the 2026-08-16 run's S&P 500 Financials sector, where the
+# bug was visible: AMP had the sector's best blended score and was published
+# last, because ranking used 'score' while selection used 'blended_score'.
+_fin_sector = [
+    {'ticker': 'TROW', 'score': 67.4, 'quality_score': 66.2, 'blended_score': 66.9},
+    {'ticker': 'RJF',  'score': 64.0, 'quality_score': 55.4, 'blended_score': 60.6},
+    {'ticker': 'AMP',  'score': 62.2, 'quality_score': 75.4, 'blended_score': 67.5},
+]
+check('published order is by blended score, not value score',
+      [s['ticker'] for s in publish_order(_fin_sector)], ['AMP', 'TROW', 'RJF'])
+
+# A stock that never got a blended score still ranks rather than raising.
+_mixed = [
+    {'ticker': 'A', 'score': 90.0},
+    {'ticker': 'B', 'score': 10.0, 'blended_score': 95.0},
+]
+check('falls back to score when blended is absent',
+      [s['ticker'] for s in publish_order(_mixed)], ['B', 'A'])
+
+# Ordering must not mutate the caller's list — the US path reassigns, the ASX
+# path passes a list it still holds a reference to.
+_orig = [{'ticker': 'X', 'score': 1.0, 'blended_score': 1.0},
+         {'ticker': 'Y', 'score': 2.0, 'blended_score': 9.0}]
+publish_order(_orig)
+check('publish_order does not mutate its input',
+      [s['ticker'] for s in _orig], ['X', 'Y'])
 
 # djia / nasdaq / russell2000 shape: a sector that yields nothing is skipped
 # entirely, so a total failure leaves no sector entries at all.

@@ -435,9 +435,20 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
     if ebit is not None and interest_expense is not None and interest_expense != 0:
         interest_coverage = ebit / abs(interest_expense)
 
-    gross_profit = _extract(income, ['grossProfit'])
-    gross_margin = (gross_profit / revenue
-                    if gross_profit is not None and revenue and revenue > 0 else None)
+    # financialData first, because the income-statement module reports no gross
+    # profit at all and the adapter surfaces the absence as 0 rather than None.
+    # `0 / revenue` is a perfectly good float, so gross_margin came out as 0.0
+    # for every stock ever published — which silently zeroed 20 points of
+    # quality_score and 5 of buffett_score across the entire universe and
+    # compressed the blended ranking. financialData is already fetched for every
+    # stock and carries the ratio directly, so this costs no extra request.
+    gross_margin = _extract(fin, ['grossMargins'])
+    if gross_margin is None:
+        gross_profit = _extract(fin, ['grossProfits']) or _extract(income, ['grossProfit'])
+        # Truthiness, not `is not None`: a zero here means "not reported", and
+        # treating it as a real value is what produced the dead metric.
+        gross_margin = (gross_profit / revenue
+                        if gross_profit and revenue and revenue > 0 else None)
 
     gm_trend = None
     if len(income_list) >= 2:
@@ -445,7 +456,10 @@ def score_from_summary(ticker: str, summary: dict, sector_id: str,
         for inc in income_list:
             gp = _extract(inc, ['grossProfit'])
             rv = _extract(inc, ['totalRevenue'])
-            if gp is not None and rv and rv > 0:
+            # Same reason as above. With no gross profit in the history, the
+            # series stays empty and the trend stays None — an honest "unknown"
+            # the app can hide, rather than a fabricated +0.0%.
+            if gp and rv and rv > 0:
                 gm_series.append(gp / rv)
         # Percentage-point change, not relative change. Gross margin is already
         # a ratio; dividing its change by its own base made "margin moved from
