@@ -819,6 +819,42 @@ check('analyst_extras tolerates missing modules',
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Empty-index guard — a failed upstream fetch must not overwrite good R2 data
+# ────────────────────────────────────────────────────────────────────────────
+from main import index_stock_count
+
+# djia / nasdaq / russell2000 shape: a sector that yields nothing is skipped
+# entirely, so a total failure leaves no sector entries at all.
+check('index_stock_count: no sectors at all is zero', index_stock_count([]), 0)
+
+# sp500 / xao shape: a sector that yields nothing is still appended, with an
+# empty stocks list. This is the shape that made the bug invisible — the payload
+# looks structurally complete and only the stock lists are empty.
+_all_empty = [
+    {'sector_id': 'sp500_tech', 'name': 'Information Technology', 'stocks': []},
+    {'sector_id': 'sp500_health', 'name': 'Health Care', 'stocks': []},
+    {'sector_id': 'sp500_finance', 'name': 'Financials', 'stocks': []},
+]
+check('index_stock_count: sectors present but all empty is zero',
+      index_stock_count(_all_empty), 0)
+
+# A single surviving stock is enough to publish — partial data beats none.
+_one = [
+    {'sector_id': 'xao_tech', 'name': 'Information Technology', 'stocks': []},
+    {'sector_id': 'xao_finance', 'name': 'Financials', 'stocks': [{'ticker': 'CBA'}]},
+]
+check('index_stock_count: one stock across empty sectors publishes',
+      index_stock_count(_one), 1)
+
+_full = [
+    {'sector_id': 'xao_tech', 'stocks': [{'ticker': 'XRO'}, {'ticker': 'WTC'}]},
+    {'sector_id': 'xao_finance', 'stocks': [{'ticker': 'CBA'}, {'ticker': 'NAB'},
+                                            {'ticker': 'WBC'}]},
+]
+check('index_stock_count: counts across sectors', index_stock_count(_full), 5)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()

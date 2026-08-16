@@ -202,6 +202,19 @@ def process_xao_sector(yahoo: YHFinanceFetcher, sector_id: str, sector_name: str
     return {'sector_id': sector_id, 'name': sector_name, 'stocks': stocks_out}
 
 
+def index_stock_count(sectors_out: list[dict]) -> int:
+    """
+    Stocks an index actually produced, across all its sectors.
+
+    Zero is the signal that an upstream fetch failed. The two empty shapes are
+    not interchangeable and both have to read as zero: sp500 and xao append a
+    sector entry with an empty 'stocks' list when a sector yields nothing, while
+    djia, nasdaq, and russell2000 skip the sector entirely — so an all-failed
+    index is `[{...'stocks': []}, ...]` in the first case and `[]` in the second.
+    """
+    return sum(len(sd['stocks']) for sd in sectors_out)
+
+
 def _format_stock(s: dict, rank: int) -> dict:
     return {
         'ticker':               s['ticker'],
@@ -307,8 +320,9 @@ def main():
     upload_json('indices.json', indices_out, BUCKET)
 
     # ── Sector stocks per index ─────────────────────────────────────────────────────────────────────────────
-    total_stocks   = 0
-    all_index_data = {}
+    total_stocks    = 0
+    all_index_data  = {}
+    skipped_indices = []
 
     for idx in INDEX_DEFINITIONS:
         print(f'\nProcessing {idx["name"]} sectors...')
@@ -326,7 +340,6 @@ def main():
                 industry_map = {s['ticker']: s.get('industry', '') for s in sector_stocks_list}
                 sd = process_xao_sector(yahoo, sector_id, gics_name, tickers, industry_map)
                 sectors_out.append(sd)
-                total_stocks += len(sd['stocks'])
 
         elif idx['id'] == 'sp500':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
@@ -337,7 +350,6 @@ def main():
                     continue
                 sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'sp500')
                 sectors_out.append(sd)
-                total_stocks += len(sd['stocks'])
 
         elif idx['id'] == 'djia':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
@@ -347,7 +359,6 @@ def main():
                     continue
                 sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'djia')
                 sectors_out.append(sd)
-                total_stocks += len(sd['stocks'])
 
         elif idx['id'] == 'nasdaq':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
@@ -357,7 +368,6 @@ def main():
                     continue
                 sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'nasdaq')
                 sectors_out.append(sd)
-                total_stocks += len(sd['stocks'])
 
         elif idx['id'] == 'russell2000':
             for gics_name, suffix in GICS_SECTORS_ORDERED:
@@ -367,8 +377,23 @@ def main():
                     continue
                 sd = process_us_sector(yahoo, fmp, edgar, sector_id, gics_name, constituents, 'russell2000', top_n=3)
                 sectors_out.append(sd)
-                total_stocks += len(sd['stocks'])
 
+        # An index that produced nothing means an upstream source failed, not
+        # that the market is empty: a Wikipedia scrape that returned no tables,
+        # an iShares CSV that timed out. Those failures are all swallowed —
+        # WikipediaScraper._fetch_tables returns [] and the IOZ/IWM fetches are
+        # wrapped — so without this guard the run would publish an index with
+        # zero stocks straight over good data in R2, and the app would render an
+        # empty index rather than last week's. Keep the previous payload and
+        # fail the run instead; stale data is recoverable, overwritten is not.
+        stock_count = index_stock_count(sectors_out)
+        if stock_count == 0:
+            print(f'  ERROR: {idx["id"]} produced 0 stocks — keeping the '
+                  f'previous R2 payload and skipping upload')
+            skipped_indices.append(idx['id'])
+            continue
+
+        total_stocks += stock_count
         index_payload = {
             'index_id':     idx['id'],
             'score_version': 1,
@@ -389,14 +414,26 @@ def main():
         'total_stocks':    total_stocks,
         'elapsed_seconds': elapsed,
     }
+    # Only present on a partial run, so a reader that ignores it sees exactly
+    # the payload it always saw.
+    if skipped_indices:
+        metadata['skipped_indices'] = skipped_indices
     upload_json('metadata.json', metadata, BUCKET)
 
     print(f'\n=== Pipeline complete in {elapsed}s — {total_stocks} stocks ===\n')
 
+    # The indices that did publish are live, so notify for them either way.
     send_data_update_notification(
         total_stocks=total_stocks,
-        indices_count=len(INDEX_DEFINITIONS),
+        indices_count=len(INDEX_DEFINITIONS) - len(skipped_indices),
     )
+
+    if skipped_indices:
+        raise SystemExit(
+            f'FAILED: no data published for {", ".join(skipped_indices)} — '
+            f'their previous R2 payload was left in place. Check the log above '
+            f'for the upstream fetch that returned nothing.'
+        )
 
 
 if __name__ == '__main__':
