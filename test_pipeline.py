@@ -922,6 +922,59 @@ check('index_stock_count: counts across sectors', index_stock_count(_full), 5)
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# WikipediaScraper.djia — constituent-source drift
+#
+# The main 'Dow Jones Industrial Average' article dropped its components table
+# between 2026-08-02 and 2026-08-16. djia() fell through to _DJIA_FALLBACK and
+# the run stayed green — so three runs published VZ, which GOOGL had replaced
+# in the index on 2026-06-29. Offline: _fetch_tables is stubbed, no network.
+# ────────────────────────────────────────────────────────────────────────────
+import pandas as pd                                          # noqa: E402
+from fetcher import WikipediaScraper, _DJIA_FALLBACK          # noqa: E402
+from sector_stocks import GICS_TO_SUFFIX                      # noqa: E402
+
+
+def _djia_from(tables):
+    scraper = WikipediaScraper()
+    scraper._fetch_tables = lambda url: tables
+    return scraper.djia()
+
+
+_list_article = pd.DataFrame({
+    'Company':    ['Alphabet (Class A)', 'Goldman Sachs', '3M'],
+    'Exchange':   ['Nasdaq', 'NYSE', 'NYSE'],
+    'Symbol':     ['GOOGL', 'GS', 'MMM'],
+    'Sector':     ['Communication Services', 'Financials', 'Industrials'],
+    'Date added': ['2026-06-29', '2013-09-23', '1976-08-09'],
+    'Notes':      ['', '', ''],
+})
+_parsed = _djia_from([_list_article])
+check('djia parses the list-article shape',
+      [s['ticker'] for s in _parsed], ['GOOGL', 'GS', 'MMM'])
+check('djia reads sector from the table rather than enriching',
+      [s['gics_sector'] for s in _parsed],
+      ['Communication Services', 'Financials', 'Industrials'])
+
+# The regression: tables present but none carrying a Symbol column is a parse
+# failure, and must be reported as one rather than yielding zero constituents.
+_no_symbol_col = pd.DataFrame({'Year': [2020, 2021], 'Closing value': [30606.48, 36338.30]})
+check('djia falls back when no table has a Symbol column',
+      _djia_from([_no_symbol_col]) is _DJIA_FALLBACK, True)
+check('djia falls back when the fetch yields no tables',
+      _djia_from([]) is _DJIA_FALLBACK, True)
+
+# Fallback integrity — whenever the scrape misses, this list IS the published
+# DJIA, so it has to be a valid index on its own.
+_fb_tickers = {d['ticker'] for d in _DJIA_FALLBACK}
+check('fallback has 30 constituents', len(_DJIA_FALLBACK), 30)
+check('fallback tickers are unique', len(_fb_tickers), 30)
+check('fallback sectors all map to a suffix',
+      [d['ticker'] for d in _DJIA_FALLBACK if d['gics_sector'] not in GICS_TO_SUFFIX], [])
+check('fallback tracks the 2026-06-29 GOOGL-for-VZ swap',
+      ('GOOGL' in _fb_tickers, 'VZ' in _fb_tickers), (True, False))
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()

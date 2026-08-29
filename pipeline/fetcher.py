@@ -1052,39 +1052,59 @@ class WikipediaScraper:
             return []
 
     def djia(self) -> list:
-        """Returns all 30 DJIA constituents."""
+        """
+        Returns all 30 DJIA constituents.
+
+        Reads the dedicated *list* article rather than the main 'Dow Jones
+        Industrial Average' page: that page dropped its components table some
+        time between 2026-08-02 and 2026-08-16, and because the miss looks
+        exactly like success (green run, healthy metadata.json, one log line),
+        djia() quietly served _DJIA_FALLBACK for three runs — publishing VZ,
+        which GOOGL had replaced in the index on 2026-06-29.
+
+        The list article carries a Sector column whose values map 1:1 onto
+        GICS_TO_SUFFIX, so the happy path no longer needs the 30-call Yahoo
+        sector enrichment; that is kept only for rows with no sector at all.
+        The Industry column is gone, which costs nothing — the published
+        `industry` field comes from the Yahoo profile (scorer.py), which is why
+        NASDAQ-100 stocks carry one despite being built with gics_industry=''.
+        """
         tables = self._fetch_tables(
-            'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
+            'https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies'
         )
-        if not tables:
-            return []
         try:
             for df in tables:
                 sym_col  = next((c for c in df.columns if 'symbol' in str(c).lower()), None)
-                name_col = next((c for c in df.columns if 'company' in str(c).lower()), None)
-                ind_col  = next((c for c in df.columns if 'industry' in str(c).lower()), None)
                 if sym_col is None:
                     continue
+                name_col = next((c for c in df.columns if 'company' in str(c).lower()), None)
+                sec_col  = next((c for c in df.columns if 'sector' in str(c).lower()), None)
+                ind_col  = next((c for c in df.columns if 'industry' in str(c).lower()), None)
                 results = []
                 for _, row in df.iterrows():
                     ticker = str(row.get(sym_col, '')).strip().replace('.', '-')
-                    name   = str(row.get(name_col, ticker)).strip() if name_col else ticker
-                    industry = str(row.get(ind_col, '')).strip() if ind_col else ''
-                    if ticker and len(ticker) <= 6 and ticker.isalpha():
-                        results.append({
-                            'ticker':        ticker,
-                            'company_name':  name,
-                            'gics_sector':   '',
-                            'gics_industry': industry,
-                        })
+                    if not (ticker and len(ticker) <= 6 and ticker.isalpha()):
+                        continue
+                    results.append({
+                        'ticker':        ticker,
+                        'company_name':  str(row.get(name_col, ticker)).strip() if name_col is not None else ticker,
+                        'gics_sector':   str(row.get(sec_col, '')).strip() if sec_col is not None else '',
+                        'gics_industry': str(row.get(ind_col, '')).strip() if ind_col is not None else '',
+                    })
                 if results:
-                    print(f'  Wikipedia DJIA: {len(results)} constituents — enriching sectors via Yahoo Finance...')
-                    results = _enrich_with_yf_sectors(results)
+                    missing = [s for s in results if not s['gics_sector']]
+                    if missing:
+                        print(f'  Wikipedia DJIA: {len(results)} constituents — '
+                              f'{len(missing)} with no sector, enriching via Yahoo Finance...')
+                        patched = {s['ticker']: s for s in _enrich_with_yf_sectors(missing)}
+                        results = [patched.get(s['ticker'], s) for s in results]
                     print(f'  Wikipedia DJIA: {len(results)} constituents')
                     return results
         except Exception as e:
             print(f'  DJIA parse error: {e}')
-        print('  DJIA Wikipedia parse failed — using static fallback')
+        print(f'  DJIA Wikipedia parse failed — using static fallback '
+              f'({len(_DJIA_FALLBACK)} constituents, snapshot {_DJIA_FALLBACK_ASOF}). '
+              f'MEMBERSHIP MAY BE STALE — check the source URL still has a Symbol column.')
         return _DJIA_FALLBACK
 
     def nasdaq100(self) -> list:
@@ -1151,14 +1171,19 @@ def _djia_sector_lookup(ticker: str) -> str:
         'AMZN': 'Consumer Discretionary', 'HD': 'Consumer Discretionary',
         'MCD':  'Consumer Discretionary', 'NKE': 'Consumer Discretionary',
         'KO':   'Consumer Staples', 'PG': 'Consumer Staples', 'WMT': 'Consumer Staples',
-        'DIS':  'Communication Services', 'VZ': 'Communication Services',
+        'DIS':  'Communication Services', 'GOOGL': 'Communication Services',
+        'VZ':   'Communication Services',
         'CVX':  'Energy', 'XOM': 'Energy',
         'SHW':  'Materials',
     }
     return _MAP.get(ticker, 'Industrials')
 
 
-# Static DJIA fallback with GICS sectors
+# Static DJIA fallback with GICS sectors.
+# Verified against the live index list on the date below — refresh it whenever
+# the pipeline logs 'using static fallback', since from that point on this list
+# IS the published DJIA and will drift with every index reshuffle.
+_DJIA_FALLBACK_ASOF = '2026-08-29'
 _DJIA_FALLBACK = [
     {'ticker': 'AAPL', 'company_name': 'Apple Inc.',                  'gics_sector': 'Information Technology', 'gics_industry': 'Technology Hardware, Storage & Peripherals'},
     {'ticker': 'AMGN', 'company_name': 'Amgen Inc.',                  'gics_sector': 'Health Care',            'gics_industry': 'Biotechnology'},
@@ -1170,6 +1195,7 @@ _DJIA_FALLBACK = [
     {'ticker': 'CSCO', 'company_name': 'Cisco Systems Inc.',          'gics_sector': 'Information Technology', 'gics_industry': 'Communications Equipment'},
     {'ticker': 'CVX',  'company_name': 'Chevron Corp.',               'gics_sector': 'Energy',                 'gics_industry': 'Integrated Oil & Gas'},
     {'ticker': 'DIS',  'company_name': 'Walt Disney Co.',             'gics_sector': 'Communication Services', 'gics_industry': 'Movies & Entertainment'},
+    {'ticker': 'GOOGL','company_name': 'Alphabet Inc. (Class A)',     'gics_sector': 'Communication Services', 'gics_industry': 'Interactive Media & Services'},
     {'ticker': 'GS',   'company_name': 'Goldman Sachs Group Inc.',    'gics_sector': 'Financials',             'gics_industry': 'Investment Banking & Brokerage'},
     {'ticker': 'HD',   'company_name': 'Home Depot Inc.',             'gics_sector': 'Consumer Discretionary', 'gics_industry': 'Home Improvement Retail'},
     {'ticker': 'HON',  'company_name': 'Honeywell International Inc.','gics_sector': 'Industrials',            'gics_industry': 'Industrial Conglomerates'},
@@ -1188,7 +1214,6 @@ _DJIA_FALLBACK = [
     {'ticker': 'TRV',  'company_name': 'Travelers Companies Inc.',    'gics_sector': 'Financials',             'gics_industry': 'Property & Casualty Insurance'},
     {'ticker': 'UNH',  'company_name': 'UnitedHealth Group Inc.',     'gics_sector': 'Health Care',            'gics_industry': 'Managed Health Care'},
     {'ticker': 'V',    'company_name': 'Visa Inc.',                   'gics_sector': 'Financials',             'gics_industry': 'Transaction & Payment Processing Services'},
-    {'ticker': 'VZ',   'company_name': 'Verizon Communications Inc.', 'gics_sector': 'Communication Services', 'gics_industry': 'Integrated Telecommunication Services'},
     {'ticker': 'WMT',  'company_name': 'Walmart Inc.',                'gics_sector': 'Consumer Staples',       'gics_industry': 'Consumer Staples Merchandise Retail'},
 ]
 
