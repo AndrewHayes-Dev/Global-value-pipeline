@@ -975,6 +975,49 @@ check('fallback tracks the 2026-06-29 GOOGL-for-VZ swap',
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# NASDAQ-100 fallback + the sector default it leans on
+#
+# api.nasdaq.com is healthy, so unlike DJIA there is no source to repoint —
+# the exposure is the snapshot going stale, and the sector guess underneath it.
+# ────────────────────────────────────────────────────────────────────────────
+from fetcher import (                                         # noqa: E402
+    _NASDAQ100_FALLBACK, _NASDAQ100_FALLBACK_ASOF,
+    _djia_sector_lookup, _nasdaq100_fallback,
+)
+
+_nq_tickers = {d['ticker'] for d in _NASDAQ100_FALLBACK}
+check('nasdaq fallback tickers are unique',
+      len(_nq_tickers), len(_NASDAQ100_FALLBACK))
+check('nasdaq fallback sectors all map to a suffix',
+      [d['ticker'] for d in _NASDAQ100_FALLBACK
+       if d['gics_sector'] not in GICS_TO_SUFFIX], [])
+check('nasdaq fallback dropped EA, which left the index',
+      'EA' in _nq_tickers, False)
+check('nasdaq fallback records its snapshot date',
+      bool(_NASDAQ100_FALLBACK_ASOF), True)
+
+# Every failure path returns the same list and says so out loud.
+check('nasdaq fallback helper returns the static list',
+      _nasdaq100_fallback('test') is _NASDAQ100_FALLBACK, True)
+
+# The sector guess: 'Industrials' for an unknown ticker silently misfiled 82 of
+# 103 NASDAQ-100 names, 39 of them Information Technology. Unknown must be ''
+# so _group_by_sector drops the row rather than inventing a sector for it.
+check('unknown ticker gets no sector rather than a guess',
+      _djia_sector_lookup('ZZZZ'), '')
+check('unknown ticker is not defaulted to Industrials',
+      _djia_sector_lookup('ALAB') == 'Industrials', False)
+check('known DJIA tickers still resolve',
+      [_djia_sector_lookup(t) for t in ('AAPL', 'JPM', 'GOOGL', 'CVX')],
+      ['Information Technology', 'Financials', 'Communication Services', 'Energy'])
+# All 30 DJIA constituents are in the map, so dropping the default changes
+# nothing for the index the helper was written for.
+check('every DJIA fallback ticker still resolves to its own sector',
+      [d['ticker'] for d in _DJIA_FALLBACK
+       if _djia_sector_lookup(d['ticker']) != d['gics_sector']], [])
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Results
 # ────────────────────────────────────────────────────────────────────────────
 print()

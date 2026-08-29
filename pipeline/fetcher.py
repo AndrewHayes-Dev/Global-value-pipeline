@@ -619,7 +619,10 @@ class FmpFetcher:
 def _enrich_with_yf_sectors(stocks: list, *, max_workers: int = 2) -> list:
     """
     Fetch GICS sector from YH Finance asset-profile for each stock.
-    Falls back to _djia_sector_lookup for any ticker where Yahoo returns empty.
+
+    Falls back to _djia_sector_lookup for any ticker where Yahoo returns empty,
+    which yields '' for tickers it does not know — _group_by_sector then drops
+    the row instead of filing it under a guessed sector.
     """
     session = requests.Session()
 
@@ -1130,8 +1133,7 @@ class WikipediaScraper:
                 timeout=30,
             )
             if r.status_code != 200:
-                print(f'  NASDAQ-100 api.nasdaq.com fetch failed: HTTP {r.status_code}')
-                return _NASDAQ100_FALLBACK
+                return _nasdaq100_fallback(f'api.nasdaq.com HTTP {r.status_code}')
             rows = r.json()['data']['data']['rows']
             results = []
             for row in rows:
@@ -1145,19 +1147,28 @@ class WikipediaScraper:
                         'gics_industry': '',
                     })
             if not results:
-                print('  NASDAQ-100 api.nasdaq.com returned no constituents — using static fallback')
-                return _NASDAQ100_FALLBACK
+                return _nasdaq100_fallback('api.nasdaq.com returned no constituents')
             print(f'  api.nasdaq.com NASDAQ-100: {len(results)} constituents — enriching sectors via Yahoo Finance...')
             results = _enrich_with_yf_sectors(results)
             print(f'  api.nasdaq.com NASDAQ-100: {len(results)} constituents')
             return results
         except Exception as e:
-            print(f'  NASDAQ-100 parse error: {e} — using static fallback')
-            return _NASDAQ100_FALLBACK
+            return _nasdaq100_fallback(f'parse error: {e}')
 
 
 def _djia_sector_lookup(ticker: str) -> str:
-    """Fallback GICS sector for DJIA tickers."""
+    """
+    Fallback GICS sector for DJIA tickers, used when Yahoo has no sector.
+
+    Returns '' for anything it does not know, so _group_by_sector drops the row
+    rather than filing it somewhere wrong. It used to default to 'Industrials',
+    which is safe for the DJIA (all 30 constituents are in _MAP) but not for
+    nasdaq100(), which routes every constituent through _enrich_with_yf_sectors:
+    82 of 103 NASDAQ-100 names — 39 of them Information Technology — would have
+    been relabelled 'Industrials' had their Yahoo lookup failed, quietly
+    corrupting the nasdaq_industrials ranking with no count anomaly to show for
+    it. A dropped stock costs coverage and is visible; a misfiled one is not.
+    """
     _MAP = {
         'AAPL': 'Information Technology', 'CSCO': 'Information Technology',
         'IBM':  'Information Technology', 'MSFT': 'Information Technology',
@@ -1176,7 +1187,7 @@ def _djia_sector_lookup(ticker: str) -> str:
         'CVX':  'Energy', 'XOM': 'Energy',
         'SHW':  'Materials',
     }
-    return _MAP.get(ticker, 'Industrials')
+    return _MAP.get(ticker, '')
 
 
 # Static DJIA fallback with GICS sectors.
@@ -1217,9 +1228,29 @@ _DJIA_FALLBACK = [
     {'ticker': 'WMT',  'company_name': 'Walmart Inc.',                'gics_sector': 'Consumer Staples',       'gics_industry': 'Consumer Staples Merchandise Retail'},
 ]
 
+
+def _nasdaq100_fallback(reason: str) -> list:
+    """
+    Single exit for every nasdaq100() failure path, so none of them can be quiet.
+
+    Each of the three used to print its own wording and one did not mention the
+    fallback at all, which is how a stale list goes unnoticed: the run stays
+    green, the stock count looks right, and nothing names the snapshot's age.
+    """
+    print(f'  NASDAQ-100 {reason} — using static fallback '
+          f'({len(_NASDAQ100_FALLBACK)} constituents, snapshot {_NASDAQ100_FALLBACK_ASOF}). '
+          f'MEMBERSHIP MAY BE STALE — verify against api.nasdaq.com.')
+    return _NASDAQ100_FALLBACK
+
+
 # Static fallback for nasdaq100() if api.nasdaq.com is ever unreachable
-# (e.g. blocked from GitHub Actions runner IPs). Snapshot taken 2026-07-13 —
-# will drift from actual NASDAQ-100 membership over time; refresh periodically.
+# (e.g. blocked from GitHub Actions runner IPs).
+# Verified against the live list on the date below — refresh it whenever the
+# pipeline logs 'using static fallback', since from that point on this list IS
+# the published NASDAQ-100 and drifts with every index reshuffle. The DJIA
+# equivalent went unrefreshed through one such swap and published a stock that
+# had left the index; see _DJIA_FALLBACK_ASOF.
+_NASDAQ100_FALLBACK_ASOF = '2026-08-29'
 _NASDAQ100_FALLBACK = [
     {'ticker': 'AAPL', 'company_name': 'Apple Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
     {'ticker': 'ABNB', 'company_name': 'Airbnb, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
@@ -1255,7 +1286,6 @@ _NASDAQ100_FALLBACK = [
     {'ticker': 'DASH', 'company_name': 'DoorDash, Inc.', 'gics_sector': 'Consumer Discretionary', 'gics_industry': ''},
     {'ticker': 'DDOG', 'company_name': 'Datadog, Inc.', 'gics_sector': 'Information Technology', 'gics_industry': ''},
     {'ticker': 'DXCM', 'company_name': 'DexCom, Inc.', 'gics_sector': 'Health Care', 'gics_industry': ''},
-    {'ticker': 'EA', 'company_name': 'Electronic Arts Inc.', 'gics_sector': 'Communication Services', 'gics_industry': ''},
     {'ticker': 'EXC', 'company_name': 'Exelon Corporation', 'gics_sector': 'Utilities', 'gics_industry': ''},
     {'ticker': 'FANG', 'company_name': 'Diamondback Energy, Inc.', 'gics_sector': 'Energy', 'gics_industry': ''},
     {'ticker': 'FAST', 'company_name': 'Fastenal Company', 'gics_sector': 'Industrials', 'gics_industry': ''},
